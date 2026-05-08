@@ -187,7 +187,6 @@
             if (state.timeline.find(t => t.id === m.id)) { return; }
             state.timeline.push({ ...m, width: 120 + Math.random() * 80 | 0 });
             renderTimeline();
-            switchTab('splice');
         }
 
         function deleteSelected() {

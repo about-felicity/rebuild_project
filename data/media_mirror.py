@@ -29,6 +29,14 @@ def _safe_project_segment(project_id: str) -> str:
     return s or "default"
 
 
+def ensure_project_media_dir(project_id: str) -> tuple[str, Path]:
+    """返回 ``(URL 段名, 目录 Path)``，与 ``/media/<segment>/...`` 一致。"""
+    seg = _safe_project_segment(project_id)
+    d = MEDIA_ROOT / seg
+    d.mkdir(parents=True, exist_ok=True)
+    return seg, d
+
+
 def _ext_from(url: str, content_type: str | None) -> str:
     ct = (content_type or "").split(";")[0].strip().lower()
     if ct in _CT_EXT:

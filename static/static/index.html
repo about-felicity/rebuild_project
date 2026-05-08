@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FrameOS — 视频工作流</title>
-    <link rel="stylesheet" href="css/workflow.css?v=13">
+    <link rel="stylesheet" href="css/workflow.css?v=19">
 </head>
 
 <body>
@@ -27,11 +27,14 @@
                 <button class="nav-item" onclick="switchTab('project')">
                     <span class="nav-dot"></span> 项目素材
                 </button>
-                <button class="nav-item" onclick="switchTab('splice')">
-                    <span class="nav-dot"></span> 视频拼接
-                </button>
                 <button class="nav-item" onclick="switchTab('reverse')">
                     <span class="nav-dot"></span> 逆向提示词
+                </button>
+                <button class="nav-item" onclick="switchTab('douyin')">
+                    <span class="nav-dot"></span> 抖音视频
+                </button>
+                <button class="nav-item" onclick="switchTab('splice')">
+                    <span class="nav-dot"></span> 视频拼接
                 </button>
             </nav>
 
@@ -52,8 +55,9 @@
             <div class="tabbar">
                 <button class="tab active" id="tab-agent" onclick="switchTab('agent')">Agent</button>
                 <button class="tab" id="tab-project" onclick="switchTab('project')">素材库</button>
-                <button class="tab" id="tab-splice" onclick="switchTab('splice')">拼接</button>
                 <button class="tab" id="tab-reverse" onclick="switchTab('reverse')">逆向</button>
+                <button class="tab" id="tab-douyin" onclick="switchTab('douyin')">抖音</button>
+                <button class="tab" id="tab-splice" onclick="switchTab('splice')">拼接</button>
                 <div class="tab-spacer"></div>
                 <span class="topbar-info" id="topbar-info">未选择项目</span>
             </div>
@@ -159,8 +163,13 @@
                                 <button class="filter-tab" onclick="filterMedia('storyboard',this)">分镜库</button>
                             </div>
                             <div class="toolbar-spacer"></div>
-                            <button class="toolbar-btn" onclick="sortMedia()">排序</button>
-                            <button class="toolbar-btn primary"
+                            <span class="media-bulk-toolbar-hint" id="library-bulk-count" aria-live="polite"></span>
+                            <button type="button" class="toolbar-btn" onclick="selectAllVisibleVideosInLibrary()" title="勾选当前列表中全部可播放的视频">全选视频</button>
+                            <button type="button" class="toolbar-btn" onclick="clearLibraryBulkSelection()" title="清除素材库中的批量勾选">清除勾选</button>
+                            <button type="button" class="toolbar-btn primary" onclick="addBulkSelectedVideosToTimelineAndGoSplice()" title="将勾选的视频加入拼接时间轴并打开拼接页">选中入轨并拼接</button>
+                            <button type="button" class="toolbar-btn" onclick="sortMedia()">排序</button>
+                            <button type="button" class="toolbar-btn" onclick="addAllVisibleVideosToTimeline()" title="将当前列表中尚未入轨的视频全部加入拼接时间轴">全部视频入轨</button>
+                            <button type="button" class="toolbar-btn primary"
                                 onclick="document.getElementById('file-upload').click()">+ 导入素材</button>
                             <input type="file" id="file-upload" multiple accept="video/*,image/*,audio/*"
                                 onchange="handleFileUpload(event)">
@@ -196,115 +205,6 @@
                             </div>
                         </div>
                     </aside>
-                </div>
-            </section>
-
-            <!-- SPLICE PANEL -->
-            <section class="panel" id="panel-splice">
-                <div class="splice-layout">
-
-                    <div class="splice-preview-area">
-                        <div class="splice-preview-main" id="splice-preview">
-                            <div class="preview-placeholder" id="preview-placeholder">
-                                <div class="preview-placeholder-icon">▶</div>
-                                <div class="preview-placeholder-text">无预览 · 请先添加片段</div>
-                            </div>
-                            <div class="preview-controls" id="preview-controls" style="display:none;">
-                                <button class="ctrl-btn" onclick="previewToggle()" id="play-btn">▶ 播放</button>
-                                <button class="ctrl-btn" onclick="seekPrev()">⏮ 上一片段</button>
-                                <button class="ctrl-btn" onclick="seekNext()">下一片段 ⏭</button>
-                                <span class="preview-time" id="preview-time">00:00 / 00:00</span>
-                            </div>
-                        </div>
-
-                        <div class="splice-clip-tray">
-                            <div class="tray-header">
-                                <span>片段列表</span>
-                                <span id="tray-total-dur">0s</span>
-                            </div>
-                            <div id="tray-items"></div>
-                            <div
-                                style="padding:0.5rem 0.75rem;margin-top:auto;border-top:var(--hairline) solid var(--border);">
-                                <button class="toolbar-btn" style="width:100%;" onclick="clearTimeline()">清空时间轴</button>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="timeline-area">
-                        <div class="timeline-toolbar">
-                            <span class="timeline-label">时间轴</span>
-                            <div class="tl-zoom">
-                                <button class="tl-zoom-btn" onclick="zoomTimeline(-1)">−</button>
-                                <button class="tl-zoom-btn" onclick="zoomTimeline(1)">+</button>
-                            </div>
-                            <button class="toolbar-btn" onclick="autoArrange()">自动排列</button>
-                            <button class="toolbar-btn" onclick="addTransition()">添加转场</button>
-                        </div>
-
-                        <div class="timeline-scroll">
-                            <div style="display:flex;flex-direction:column;gap:6px;padding-bottom:0.5rem;">
-                                <div class="timeline-track">
-                                    <span class="tl-track-label">VIDEO</span>
-                                    <div class="tl-clips-row" id="tl-video-row">
-                                        <div class="tl-add-zone" onclick="switchTab('project')">+ 从素材库添加</div>
-                                    </div>
-                                </div>
-                                <div class="timeline-track">
-                                    <span class="tl-track-label">AUDIO</span>
-                                    <div class="tl-clips-row" id="tl-audio-row">
-                                        <div class="tl-add-zone" onclick="switchTab('project')">+ 添加音频</div>
-                                    </div>
-                                </div>
-                                <div class="timeline-track">
-                                    <span class="tl-track-label">TEXT</span>
-                                    <div class="tl-clips-row" id="tl-text-row">
-                                        <div class="tl-add-zone" onclick="addTextClip()">+ 添加字幕</div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div class="timeline-settings">
-                            <div class="setting-group">
-                                <span class="setting-label">分辨率</span>
-                                <select class="setting-select" id="res-select">
-                                    <option>1920×1080</option>
-                                    <option>1280×720</option>
-                                    <option>3840×2160</option>
-                                    <option>1080×1920</option>
-                                    <option>1080×1080</option>
-                                </select>
-                            </div>
-                            <div class="setting-group">
-                                <span class="setting-label">帧率</span>
-                                <select class="setting-select">
-                                    <option>24fps</option>
-                                    <option>30fps</option>
-                                    <option>60fps</option>
-                                </select>
-                            </div>
-                            <div class="setting-group">
-                                <span class="setting-label">格式</span>
-                                <select class="setting-select">
-                                    <option>MP4 (H.264)</option>
-                                    <option>MOV (ProRes)</option>
-                                    <option>WebM (VP9)</option>
-                                </select>
-                            </div>
-                            <div class="setting-group">
-                                <span class="setting-label">转场</span>
-                                <select class="setting-select" id="transition-select">
-                                    <option>淡入淡出</option>
-                                    <option>交叉溶解</option>
-                                    <option>切换</option>
-                                    <option>滑动</option>
-                                    <option>无</option>
-                                </select>
-                            </div>
-                            <button class="export-btn" onclick="exportVideo()">导出视频 →</button>
-                        </div>
-                    </div>
-
                 </div>
             </section>
 
@@ -408,6 +308,206 @@
 
                         <div class="json-content" id="json-raw">
                             <div class="json-raw" id="raw-content">// 等待生成...</div>
+                        </div>
+                    </div>
+
+                </div>
+            </section>
+
+            <!-- DOUYIN PANEL -->
+            <section class="panel" id="panel-douyin">
+                <div class="douyin-layout">
+                    <div class="douyin-form-col">
+                        <div class="douyin-col-header">
+                            <div class="douyin-col-title">抖音视频获取</div>
+                            <div class="douyin-col-desc">粘贴抖音短链或包含 http(s) 的分享全文，保存为当前项目的视频素材（写入视频库）。</div>
+                        </div>
+                        <div class="douyin-body">
+                            <div class="rev-field">
+                                <label class="rev-label" for="dy-share-text">分享链接 / 口令</label>
+                                <textarea class="rev-textarea" id="dy-share-text" rows="5"
+                                    placeholder="例如：https://v.douyin.com/xxxxx/ 或 App 复制的整段文案"></textarea>
+                            </div>
+                            <div class="rev-field">
+                                <label class="rev-label" for="dy-video-title">素材标题（可选）</label>
+                                <input type="text" class="modal-input" id="dy-video-title" style="width:100%;box-sizing:border-box;"
+                                    placeholder="在视频库中显示的名字">
+                            </div>
+                            <button type="button" class="analyze-btn" id="dy-fetch-btn" onclick="submitDouyinFetch()">下载到视频库</button>
+                            <div class="douyin-status" id="dy-status"></div>
+                        </div>
+                    </div>
+                    <div class="douyin-preview-col">
+                        <div class="douyin-preview-head">
+                            <span class="json-label">播放器</span>
+                            <button type="button" class="toolbar-btn" onclick="switchTab('project')">打开素材库</button>
+                        </div>
+                        <div class="douyin-preview-body" id="dy-preview-wrap">
+                            <div class="dy-player-stage" id="dy-preview-stage">
+                                <header class="dy-player-chrome" aria-label="预览播放器">
+                                    <span class="dy-player-chrome-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+                                    <span class="dy-player-chrome-title">本地预览</span>
+                                    <span class="dy-player-chrome-badge" id="dy-player-format">MP4</span>
+                                </header>
+                                <div class="dy-player-viewport">
+                                    <div class="dy-player-placeholder" id="dy-preview-empty">
+                                        <div class="dy-player-placeholder-frame" aria-hidden="true">
+                                            <svg class="dy-player-placeholder-svg" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                                <rect x="4" y="10" width="56" height="44" rx="6" stroke="currentColor" stroke-width="1.5" opacity="0.35"/>
+                                                <path d="M28 24v16l14-8-14-8z" fill="currentColor" opacity="0.45"/>
+                                            </svg>
+                                        </div>
+                                        <p class="dy-player-placeholder-title">等待视频</p>
+                                        <p class="dy-player-placeholder-hint">下载成功后在此播放，支持进度条与音量</p>
+                                    </div>
+                                    <div class="dy-player-video-shell" id="dy-video-shell" hidden>
+                                        <video class="dy-player-video" id="dy-preview-video" controls playsinline
+                                            preload="metadata" controlsList="nodownload"></video>
+                                    </div>
+                                </div>
+                                <footer class="dy-player-footer">
+                                    <span class="dy-player-footer-hint" id="dy-player-footer-hint">竖屏或横屏视频将自动适配画幅</span>
+                                </footer>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- SPLICE PANEL -->
+            <section class="panel" id="panel-splice">
+                <div class="splice-layout">
+
+                    <div class="splice-preview-area">
+                        <div class="sp-preview-column">
+                            <div class="sp-player-stage" id="splice-preview">
+                                <header class="sp-player-chrome" aria-label="拼接预览">
+                                    <span class="sp-player-chrome-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+                                    <span class="sp-player-chrome-title">时间轴预览</span>
+                                    <span class="sp-player-chrome-badge" id="sp-clip-badge" title="当前片段序号">— / —</span>
+                                </header>
+                                <div class="sp-player-viewport">
+                                    <div class="sp-player-placeholder" id="preview-placeholder">
+                                        <div class="sp-player-placeholder-icon" aria-hidden="true">
+                                            <svg viewBox="0 0 64 48" fill="none" xmlns="http://www.w3.org/2000/svg" class="sp-ph-svg">
+                                                <rect x="2" y="4" width="60" height="40" rx="4" stroke="currentColor" stroke-width="1.25" opacity="0.35"/>
+                                                <path d="M26 18v12l10-6-10-6z" fill="currentColor" opacity="0.5"/>
+                                            </svg>
+                                        </div>
+                                        <p class="sp-player-placeholder-title">尚未添加视频片段</p>
+                                        <p class="sp-player-placeholder-hint">在下方 VIDEO 轨道从素材库拖入或添加后，将在此预览；片尾接播使用双缓冲预解码，多数情况下可无明显闪黑（仍取决于浏览器与编码）。</p>
+                                    </div>
+                                    <div class="sp-video-stack">
+                                        <video class="sp-player-video is-splice-buffer-back" id="splice-preview-video-b"
+                                            playsinline preload="auto" style="display:none;"></video>
+                                        <video class="sp-player-video" id="splice-preview-video" controls playsinline
+                                            preload="auto" style="display:none;"></video>
+                                    </div>
+                                </div>
+                                <footer class="sp-transport" id="preview-controls" style="display:none;" aria-label="播放控制">
+                                    <div class="sp-transport-main">
+                                        <button type="button" class="sp-transport-btn sp-transport-btn--play" onclick="previewToggle()" id="play-btn" title="播放 / 暂停">
+                                            <span class="sp-transport-play-icon" aria-hidden="true">▶</span>
+                                            <span class="sp-transport-play-label">播放</span>
+                                        </button>
+                                        <div class="sp-transport-cluster">
+                                            <button type="button" class="sp-transport-btn sp-transport-btn--ghost" onclick="seekPrev()" title="上一片段">⏮ 上一段</button>
+                                            <button type="button" class="sp-transport-btn sp-transport-btn--ghost" onclick="seekNext()" title="下一片段">下一段 ⏭</button>
+                                        </div>
+                                        <div class="sp-transport-readout">
+                                            <time class="sp-timecode" id="preview-time">00:00 / 00:00</time>
+                                            <span class="sp-now-playing" id="sp-now-playing" title="">—</span>
+                                        </div>
+                                    </div>
+                                </footer>
+                            </div>
+                        </div>
+
+                        <div class="splice-clip-tray">
+                            <div class="tray-header">
+                                <span>片段列表</span>
+                                <span id="tray-total-dur">0s</span>
+                            </div>
+                            <div id="tray-items"></div>
+                            <div
+                                style="padding:0.5rem 0.75rem;margin-top:auto;border-top:var(--hairline) solid var(--border);">
+                                <button class="toolbar-btn" style="width:100%;" onclick="clearTimeline()">清空时间轴</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="timeline-area">
+                        <div class="timeline-toolbar">
+                            <span class="timeline-label">时间轴</span>
+                            <div class="tl-zoom">
+                                <button class="tl-zoom-btn" onclick="zoomTimeline(-1)">−</button>
+                                <button class="tl-zoom-btn" onclick="zoomTimeline(1)">+</button>
+                            </div>
+                            <button class="toolbar-btn" onclick="autoArrange()">自动排列</button>
+                            <button class="toolbar-btn" onclick="addTransition()">添加转场</button>
+                        </div>
+
+                        <div class="timeline-scroll">
+                            <div style="display:flex;flex-direction:column;gap:6px;padding-bottom:0.5rem;">
+                                <div class="timeline-track">
+                                    <span class="tl-track-label">VIDEO</span>
+                                    <div class="tl-clips-row" id="tl-video-row">
+                                        <div class="tl-add-zone" onclick="switchTab('project')">+ 从素材库添加</div>
+                                    </div>
+                                </div>
+                                <div class="timeline-track">
+                                    <span class="tl-track-label">AUDIO</span>
+                                    <div class="tl-clips-row" id="tl-audio-row">
+                                        <div class="tl-add-zone" onclick="switchTab('project')">+ 添加音频</div>
+                                    </div>
+                                </div>
+                                <div class="timeline-track">
+                                    <span class="tl-track-label">TEXT</span>
+                                    <div class="tl-clips-row" id="tl-text-row">
+                                        <div class="tl-add-zone" onclick="addTextClip()">+ 添加字幕</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="timeline-settings">
+                            <div class="setting-group">
+                                <span class="setting-label">分辨率</span>
+                                <select class="setting-select" id="res-select">
+                                    <option>1920×1080</option>
+                                    <option>1280×720</option>
+                                    <option>3840×2160</option>
+                                    <option>1080×1920</option>
+                                    <option>1080×1080</option>
+                                </select>
+                            </div>
+                            <div class="setting-group">
+                                <span class="setting-label">帧率</span>
+                                <select class="setting-select">
+                                    <option>24fps</option>
+                                    <option>30fps</option>
+                                    <option>60fps</option>
+                                </select>
+                            </div>
+                            <div class="setting-group">
+                                <span class="setting-label">格式</span>
+                                <select class="setting-select">
+                                    <option>MP4 (H.264)</option>
+                                    <option>MOV (ProRes)</option>
+                                    <option>WebM (VP9)</option>
+                                </select>
+                            </div>
+                            <div class="setting-group">
+                                <span class="setting-label">转场</span>
+                                <select class="setting-select" id="transition-select">
+                                    <option>淡入淡出</option>
+                                    <option>交叉溶解</option>
+                                    <option>切换</option>
+                                    <option>滑动</option>
+                                    <option>无</option>
+                                </select>
+                            </div>
+                            <button class="export-btn" onclick="exportVideo()">导出视频 →</button>
                         </div>
                     </div>
 

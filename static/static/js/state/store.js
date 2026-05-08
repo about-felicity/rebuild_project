@@ -4,7 +4,11 @@ export const state = {
     activeProject: null,
     projects: [],
     selectedMedia: null,
+    /** 素材库批量入轨：{ [mediaId 字符串]: true }，不入本地存储 */
+    libraryBulkSelectedIds: {},
     timeline: [],
+    /** 时间轴上当前选中的片段索引（用于预览播放 / 上一段下一段） */
+    timelineSelectedIndex: 0,
     selectedColor: "#3a6e00",
     /** 按项目 id 隔离的 Agent 对话：{ [projectId: string]: Array<{ role: 'user'|'agent', text: string }> } */
     agentThreads: {},

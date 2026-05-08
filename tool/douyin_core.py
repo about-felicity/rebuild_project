@@ -31,26 +31,170 @@ def extract_fst_url(text: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _normalize_play_url(url: str) -> str:
+    return (url or "").strip().replace("playwm", "play")
+
+
+def _urls_from_video_block(video: dict) -> list[str]:
+    out: list[str] = []
+    if not isinstance(video, dict):
+        return out
+    for key in ("play_addr", "play_addr_h264", "play_addr_lowbr"):
+        block = video.get(key)
+        if isinstance(block, dict):
+            ul = block.get("url_list")
+            if isinstance(ul, list):
+                out.extend(str(u) for u in ul if u)
+    for br in video.get("bit_rate") or []:
+        if not isinstance(br, dict):
+            continue
+        block = br.get("play_addr")
+        if isinstance(block, dict) and isinstance(block.get("url_list"), list):
+            out.extend(str(u) for u in block["url_list"] if u)
+    return out
+
+
+def _item_to_play_url(item: dict) -> tuple[str, str] | None:
+    if not isinstance(item, dict):
+        return None
+    vid = str(item.get("aweme_id") or item.get("id") or "").strip()
+    video = item.get("video")
+    if not isinstance(video, dict):
+        return None
+    urls = _urls_from_video_block(video)
+    if not urls:
+        return None
+    return _normalize_play_url(urls[0]), vid
+
+
+def _from_video_info_res(vir: dict) -> tuple[str, str] | None:
+    if not isinstance(vir, dict):
+        return None
+    items = vir.get("item_list")
+    if isinstance(items, list) and items:
+        hit = _item_to_play_url(items[0])
+        if hit:
+            return hit
+    for key in ("aweme_detail", "aweme", "itemInfo", "item"):
+        node = vir.get(key)
+        if isinstance(node, dict):
+            hit = _item_to_play_url(node)
+            if hit:
+                return hit
+    return None
+
+
+def _deep_collect_play_pairs(obj: object, depth: int = 0) -> list[tuple[str, str]]:
+    """在整棵 JSON 里找带 aweme_id + video.play_addr 的节点。"""
+    if depth > 28:
+        return []
+    out: list[tuple[str, str]] = []
+    if isinstance(obj, dict):
+        aid = str(obj.get("aweme_id") or obj.get("id") or "").strip()
+        video = obj.get("video")
+        if isinstance(video, dict) and (obj.get("aweme_id") is not None or "play_addr" in video):
+            for u in _urls_from_video_block(video):
+                nu = _normalize_play_url(u)
+                if nu.startswith("http"):
+                    out.append((nu, aid))
+        for v in obj.values():
+            out.extend(_deep_collect_play_pairs(v, depth + 1))
+    elif isinstance(obj, list):
+        for x in obj:
+            out.extend(_deep_collect_play_pairs(x, depth + 1))
+    return out
+
+
+def _resolve_from_router_json(json_data: dict, fallback_video_id: str) -> tuple[str, str] | None:
+    loader = json_data.get("loaderData")
+    if isinstance(loader, dict):
+        for key in ("video_(id)/page",):
+            page = loader.get(key)
+            if isinstance(page, dict):
+                vir = page.get("videoInfoRes")
+                if isinstance(vir, dict):
+                    hit = _from_video_info_res(vir)
+                    if hit:
+                        u, vid = hit
+                        return u, vid or fallback_video_id
+        for page in loader.values():
+            if not isinstance(page, dict):
+                continue
+            vir = page.get("videoInfoRes")
+            if isinstance(vir, dict):
+                hit = _from_video_info_res(vir)
+                if hit:
+                    u, vid = hit
+                    return u, vid or fallback_video_id
+    candidates = _deep_collect_play_pairs(json_data)
+    if not candidates:
+        return None
+
+    def score(t: tuple[str, str]) -> int:
+        url = t[0].lower()
+        s = 0
+        if ".mp4" in url or "/aweme/" in url or "vod" in url or "byte" in url:
+            s += 5
+        if "playwm" in t[0]:
+            s -= 1
+        return s
+
+    candidates.sort(key=score, reverse=True)
+    u, vid = candidates[0]
+    return u, vid or fallback_video_id
+
+
+def _regex_play_url_from_html(html: str) -> str | None:
+    patterns = (
+        r'"url_list"\s*:\s*\[\s*"((?:https?:)?\\/\\/[^"\\]+)"',
+        r'"url_list"\s*:\s*\[\s*"(https?://[^"]+)"',
+        r'(https://[^"\'\s<>]+(?:aweme|vod|bytecdn|douyinvod)[^"\'\s<>]+)',
+        r'(https://[^"\'\s<>]+\.mp4[^"\'\s<>]*)',
+    )
+    for pat in patterns:
+        m = re.search(pat, html, re.I)
+        if not m:
+            continue
+        u = m.group(1).replace(r"\/", "/")
+        if u.startswith("http"):
+            return u
+    return None
+
+
 def get_video_url(share_url: str) -> tuple[str, str]:
-    response = requests.get(share_url, headers=HEADER, timeout=30)
+    response = requests.get(share_url, headers=HEADER, timeout=30, allow_redirects=True)
     response.raise_for_status()
-    video_id = response.url.split("?")[0].strip("/").split("/")[-1]
+    video_id = response.url.split("?")[0].rstrip("/").split("/")[-1]
     page_url = f"https://www.iesdouyin.com/share/video/{video_id}"
-    response = requests.get(page_url, headers=HEADER, timeout=30)
+    response = requests.get(page_url, headers=HEADER, timeout=30, allow_redirects=True)
     response.raise_for_status()
+    html = response.text
 
     pattern = re.compile(
         r"window\._ROUTER_DATA\s*=\s*(.*?)</script>",
         flags=re.DOTALL,
     )
-    find_res = pattern.search(response.text)
+    find_res = pattern.search(html)
     if not find_res or not find_res.group(1):
-        raise ValueError("parse video json info from html fail")
+        raise ValueError("parse video json info from html fail (no _ROUTER_DATA)")
 
-    json_data = json.loads(find_res.group(1).strip())
-    data = json_data["loaderData"]["video_(id)/page"]["videoInfoRes"]["item_list"][0]
-    video_url = data["video"]["play_addr"]["url_list"][0].replace("playwm", "play")
-    return video_url, video_id
+    raw = find_res.group(1).strip()
+    try:
+        json_data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"parse _ROUTER_DATA json fail: {e}") from e
+
+    resolved = _resolve_from_router_json(json_data, video_id)
+    if resolved:
+        return resolved
+
+    reg = _regex_play_url_from_html(html)
+    if reg:
+        return _normalize_play_url(reg), video_id
+
+    raise ValueError(
+        "无法在页面中解析视频地址（item_list 等字段可能已调整）。可换一条分享链接或稍后再试。"
+    )
 
 
 def download_video(video_url: str, save_path: str | Path) -> str:

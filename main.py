@@ -23,6 +23,7 @@ from data.db import (
     delete_project_data,
     list_project_assets,
 )
+from agent_runtime.douyin_service import douyin_fetch_and_persist
 
 app = FastAPI()
 
@@ -83,6 +84,17 @@ class ProjectAssetRow(BaseModel):
 
 class SessionClearedResponse(BaseModel):
     ok: bool = True
+
+
+class DouyinFetchBody(BaseModel):
+    project_id: str = Field(..., min_length=1)
+    share_text: str = Field(..., min_length=1)
+    video_title: str = ""
+
+
+class DouyinFetchResponse(BaseModel):
+    ok: bool = True
+    uri: str
 
 
 def _agent_failure_http_detail(exc: Exception) -> tuple[int, str, str]:
@@ -181,6 +193,22 @@ def delete_project(project_id: str) -> SessionClearedResponse:
     """删除该 project_id 的聊天记录与 project_assets 行（与前端「删除项目」对齐）。"""
     delete_project_data(project_id.strip())
     return SessionClearedResponse(ok=True)
+
+
+@app.post("/api/douyin/fetch", response_model=DouyinFetchResponse)
+def http_douyin_fetch(body: DouyinFetchBody) -> DouyinFetchResponse:
+    """解析抖音分享并保存为当前项目视频库素材。"""
+    try:
+        out = douyin_fetch_and_persist(
+            body.project_id.strip(),
+            body.share_text.strip(),
+            video_title=(body.video_title or "").strip(),
+        )
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(502, detail=str(e)[:800]) from e
+    return DouyinFetchResponse(ok=True, uri=str(out["uri"]))
 
 
 @app.get("/api/projects/{project_id}/assets", response_model=list[ProjectAssetRow])

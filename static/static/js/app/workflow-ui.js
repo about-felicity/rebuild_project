@@ -8,6 +8,7 @@ import {
 } from "../api/agent.js";
 import { deleteProjectRemote, fetchProjectAssets } from "../api/projects.js";
 import { requestStoryboardJson } from "../api/analysis.js";
+import { requestDouyinFetch } from "../api/douyin.js";
 import { requestExportVideo } from "../api/splice.js";
 import { escHtml, escAttr, formatSize, parseDur, formatDuration } from "../utils/helpers.js";
 
@@ -630,6 +631,7 @@ function startPendingAssistantPoll(pid) {
 async function selectProject(p) {
     migrateProjectMediaLibraries(p);
     rememberActiveProjectId(p.id);
+    state.libraryBulkSelectedIds = {};
     state.activeProject = p;
     renderProjects();
     setTopbarInfo(p.name + " · " + projectMediaCount(p) + " 个素材");
@@ -818,11 +820,20 @@ function switchTab(tab) {
     document.getElementById('panel-' + tab).classList.add('active');
     document.getElementById('tab-' + tab).classList.add('active');
     // Update nav items
-    const navLabels = { agent: 'Agent 对话', project: '项目素材', splice: '视频拼接', reverse: '逆向提示词' };
+    const navLabels = {
+        agent: 'Agent 对话',
+        project: '项目素材',
+        reverse: '逆向提示词',
+        douyin: '抖音视频',
+        splice: '视频拼接',
+    };
     document.querySelectorAll('.nav-item').forEach(n => {
         if (n.textContent.trim().startsWith(navLabels[tab].slice(0, 3))) n.classList.add('active');
     });
     if (tab === "project" && state.activeProject) {
+        void refreshServerAssetsForActiveProject();
+    }
+    if (tab === "douyin" && state.activeProject) {
         void refreshServerAssetsForActiveProject();
     }
 }
@@ -836,7 +847,7 @@ function resolveAssetPreviewUrl(raw) {
     if (raw == null || raw === "") return "";
     const u = String(raw).trim();
     if (!u) return "";
-    if (/^https?:\/\//i.test(u) || u.startsWith("//") || u.startsWith("data:")) return u;
+    if (/^https?:\/\//i.test(u) || u.startsWith("//") || u.startsWith("data:") || u.startsWith("blob:")) return u;
     if (u.startsWith("/")) {
         const base = CONFIG.API_BASE_URL.replace(/\/$/, "");
         return base + u;
@@ -866,6 +877,117 @@ function mediaCardZoomBtnHtml(m) {
     if (!Number.isFinite(id)) return "";
     const glyph = `<svg class="media-zoom-btn__glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M8 4H4v4M16 4h4v4M4 16v4h4M20 16v4h-4" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="2.25" stroke="currentColor" stroke-width="1.65"/></svg>`;
     return `<button type="button" class="media-zoom-btn" aria-label="浏览大图" title="浏览大图" onclick="event.stopPropagation();openMediaLightbox(${id})">${glyph}</button>`;
+}
+
+/** 视频卡片角标：一键加入拼接时间轴（不打开详情） */
+function mediaQuickTimelineBtnHtml(m) {
+    if (!isTimelineVideoClip(m)) return "";
+    const id = Number(m.id);
+    if (!Number.isFinite(id)) return "";
+    return `<button type="button" class="media-quick-timeline" title="加入拼接时间轴" aria-label="加入拼接时间轴" onclick="event.stopPropagation();quickAddVideoToTimeline(${id})">＋轨</button>`;
+}
+
+function updateLibraryBulkToolbar() {
+    const el = document.getElementById("library-bulk-count");
+    if (!el) return;
+    const n = Object.keys(state.libraryBulkSelectedIds).length;
+    el.textContent = n ? `已选 ${n}` : "";
+}
+
+/** 视频：右上角方框＝批量入轨勾选；非视频：同方框表示当前详情选中（点卡片选中） */
+function toggleVideoBulkSelectFromEl(el) {
+    if (!(el instanceof HTMLElement)) return;
+    const sid = el.dataset.bulkId;
+    if (!sid) return;
+    if (state.libraryBulkSelectedIds[sid]) delete state.libraryBulkSelectedIds[sid];
+    else state.libraryBulkSelectedIds[sid] = true;
+    updateLibraryBulkToolbar();
+    refreshMediaGridView();
+}
+
+function mediaCheckSlotHtml(m) {
+    const isSelected = state.selectedMedia && state.selectedMedia.id === m.id;
+    if (isTimelineVideoClip(m) && m.id !== undefined && m.id !== null) {
+        const sid = String(m.id);
+        const bulk = !!state.libraryBulkSelectedIds[sid];
+        return `<div class="media-check media-check--toggle-bulk${bulk ? " is-on" : ""}" role="checkbox" aria-checked="${bulk}" title="勾选后加入「选中入轨并拼接」" data-bulk-id="${escAttr(sid)}" onclick="event.stopPropagation();toggleVideoBulkSelectFromEl(this)">${bulk ? "✓" : ""}</div>`;
+    }
+    return `<div class="media-check">${isSelected ? "✓" : ""}</div>`;
+}
+
+function selectAllVisibleVideosInLibrary() {
+    if (!state.activeProject) {
+        showToast("请先选择项目");
+        return;
+    }
+    const view = getActiveProjectMediaView();
+    let n = 0;
+    for (const m of view) {
+        if (!isTimelineVideoClip(m)) continue;
+        if (!resolveClipPlaybackUrl(m)) continue;
+        state.libraryBulkSelectedIds[String(m.id)] = true;
+        n++;
+    }
+    if (!n) {
+        showToast("当前列表没有可入轨的视频");
+        return;
+    }
+    refreshMediaGridView();
+    showToast(`已勾选 ${n} 个视频`);
+}
+
+function clearLibraryBulkSelection() {
+    state.libraryBulkSelectedIds = {};
+    refreshMediaGridView();
+}
+
+/** 将勾选的视频按当前列表顺序加入时间轴，并打开拼接页 */
+function addBulkSelectedVideosToTimelineAndGoSplice() {
+    if (!state.activeProject) {
+        showToast("请先选择项目");
+        return;
+    }
+    const keys = Object.keys(state.libraryBulkSelectedIds);
+    if (!keys.length) {
+        showToast("请先勾选视频");
+        return;
+    }
+    const keySet = new Set(keys);
+    const view = getActiveProjectMediaView();
+    let added = 0;
+    let skippedOnTimeline = 0;
+    let skippedNoUrl = 0;
+    for (const m of view) {
+        if (!keySet.has(String(m.id))) continue;
+        if (!isTimelineVideoClip(m)) continue;
+        if (!resolveClipPlaybackUrl(m)) {
+            skippedNoUrl++;
+            continue;
+        }
+        if (state.timeline.find((t) => t.id === m.id)) {
+            skippedOnTimeline++;
+            continue;
+        }
+        state.timeline.push({ ...m, width: 120 + Math.random() * 80 | 0 });
+        added++;
+    }
+    if (!added) {
+        showToast(
+            skippedNoUrl
+                ? "所勾选项无播放地址或不可预览，请等待同步"
+                : skippedOnTimeline
+                  ? "所选视频已在时间轴中"
+                  : "没有可添加的视频",
+        );
+        return;
+    }
+    state.timelineSelectedIndex = state.timeline.length - 1;
+    state.selectedMedia = state.timeline[state.timelineSelectedIndex];
+    renderTimeline();
+    state.libraryBulkSelectedIds = {};
+    refreshMediaGridView();
+    switchTab("splice");
+    showToast(`已添加 ${added} 个视频到时间轴`);
 }
 
 let _mediaLightboxEsc = null;
@@ -1001,6 +1123,8 @@ function getActiveProjectMediaView() {
 function refreshMediaGridView() {
     const grid = document.getElementById("media-grid");
     if (!state.activeProject) {
+        state.libraryBulkSelectedIds = {};
+        updateLibraryBulkToolbar();
         if (grid) {
             grid.innerHTML =
                 '<div style="grid-column:1/-1;padding:2rem;text-align:center;color:var(--muted);font-size:0.6875rem;letter-spacing:0.06em;">← 从左侧选择项目，或新建项目</div>';
@@ -1008,6 +1132,7 @@ function refreshMediaGridView() {
         return;
     }
     renderMediaGrid(getActiveProjectMediaView());
+    updateLibraryBulkToolbar();
 }
 
 function renderMediaGrid(media) {
@@ -1027,10 +1152,11 @@ function renderMediaGrid(media) {
       <div class="media-thumb">
 ${mediaThumbInnerHtml(m)}
 ${mediaCardZoomBtnHtml(m)}
+${mediaQuickTimelineBtnHtml(m)}
 <span class="thumb-type-badge ${t}">${t}</span>
 ${m.dur ? `<span class="thumb-duration">${m.dur}</span>` : ''}
       </div>
-      <div class="media-check">${isSelected ? '✓' : ''}</div>
+${mediaCheckSlotHtml(m)}
       <div class="media-info">
 <div class="media-name" title="${m.name}">${m.name}</div>
 <div class="media-meta">${m.size || '—'} ${m.res || m.dur || ''}</div>
@@ -1113,7 +1239,16 @@ function handleFileUpload(e) {
         const type = f.type.startsWith('video') ? 'video' : f.type.startsWith('image') ? 'image' : 'audio';
         const id = Date.now() + i;
         const library = type === 'video' ? 'video' : 'asset';
-        state.activeProject.media.push({ id, name: f.name, type, size: formatSize(f.size), library });
+        const objectUrl = URL.createObjectURL(f);
+        state.activeProject.media.push({
+            id,
+            name: f.name,
+            type,
+            size: formatSize(f.size),
+            library,
+            url: objectUrl,
+            _localObjectUrl: true,
+        });
     });
     refreshMediaGridView();
     renderProjects();
@@ -1127,13 +1262,82 @@ function addToTimeline() {
     const m = state.selectedMedia;
     if (state.timeline.find(t => t.id === m.id)) { return; }
     state.timeline.push({ ...m, width: 120 + Math.random() * 80 | 0 });
+    state.timelineSelectedIndex = state.timeline.length - 1;
     renderTimeline();
-    switchTab('splice');
+    showToast("已加入时间轴");
+}
+
+/** 素材库卡片「＋轨」：不经过详情直接入轨 */
+function quickAddVideoToTimeline(mediaId) {
+    if (!state.activeProject) {
+        showToast("请先选择项目");
+        return;
+    }
+    const m = state.activeProject.media.find((x) => x.id === mediaId);
+    if (!m) return;
+    if (!isTimelineVideoClip(m)) {
+        showToast("仅视频可加入时间轴");
+        return;
+    }
+    if (!resolveClipPlaybackUrl(m)) {
+        showToast("视频地址未就绪，请等待同步后重试");
+        return;
+    }
+    if (state.timeline.find((t) => t.id === m.id)) {
+        showToast("该视频已在时间轴中");
+        return;
+    }
+    state.selectedMedia = m;
+    state.timeline.push({ ...m, width: 120 + Math.random() * 80 | 0 });
+    state.timelineSelectedIndex = state.timeline.length - 1;
+    renderTimeline();
+    showToast("已加入时间轴");
+    refreshMediaGridView();
+}
+
+/** 工具栏：当前筛选列表里尚未入轨的视频全部加入 */
+function addAllVisibleVideosToTimeline() {
+    if (!state.activeProject) {
+        showToast("请先选择项目");
+        return;
+    }
+    const candidates = getActiveProjectMediaView().filter(
+        (m) => isTimelineVideoClip(m) && resolveClipPlaybackUrl(m),
+    );
+    if (!candidates.length) {
+        showToast("当前列表没有可入轨的视频");
+        return;
+    }
+    let added = 0;
+    for (const m of candidates) {
+        if (state.timeline.find((t) => t.id === m.id)) continue;
+        state.timeline.push({ ...m, width: 120 + Math.random() * 80 | 0 });
+        added++;
+    }
+    if (!added) {
+        showToast("列表中的视频已全部在时间轴");
+        return;
+    }
+    state.timelineSelectedIndex = state.timeline.length - 1;
+    renderTimeline();
+    showToast(`已加入 ${added} 个视频到时间轴`);
+    refreshMediaGridView();
 }
 
 function deleteSelected() {
     if (!state.selectedMedia || !state.activeProject) return;
-    state.activeProject.media = state.activeProject.media.filter(m => m.id !== state.selectedMedia.id);
+    const victim = state.selectedMedia;
+    if (victim._localObjectUrl && victim.url) {
+        try {
+            URL.revokeObjectURL(victim.url);
+        } catch (_) { /* ignore */ }
+    }
+    state.activeProject.media = state.activeProject.media.filter(m => m.id !== victim.id);
+    state.timeline = state.timeline.filter((t) => t.id !== victim.id);
+    if (state.timelineSelectedIndex >= state.timeline.length) {
+        state.timelineSelectedIndex = Math.max(0, state.timeline.length - 1);
+    }
+    renderTimeline();
     state.selectedMedia = null;
     closeMediaDetail();
     refreshMediaGridView();
@@ -1150,19 +1354,316 @@ function analyzeSelected() {
 }
 
 // ===== TIMELINE =====
+function isTimelineVideoClip(c) {
+    return !!(c && (c.type === "video" || c.library === "video"));
+}
+
+/** 从 currentIdx 之后找第一个可播放的视频轨道索引，没有则 -1 */
+function findNextPlayableVideoIndex(currentIdx) {
+    let idx = currentIdx + 1;
+    while (idx < state.timeline.length) {
+        const c = state.timeline[idx];
+        if (isTimelineVideoClip(c) && resolveClipPlaybackUrl(c)) return idx;
+        idx++;
+    }
+    return -1;
+}
+
+function getSpliceVideoEls() {
+    return {
+        a: document.getElementById("splice-preview-video"),
+        b: document.getElementById("splice-preview-video-b"),
+    };
+}
+
+/** 当前可见、带控件的一层（另一层预载下一段） */
+function getSpliceForegroundEl() {
+    const { a, b } = getSpliceVideoEls();
+    if (!a) return b;
+    if (!b) return a;
+    return a.classList.contains("is-splice-buffer-back") ? b : a;
+}
+
+function getSpliceBackgroundEl() {
+    const { a, b } = getSpliceVideoEls();
+    if (!a || !b) return null;
+    return a.classList.contains("is-splice-buffer-back") ? a : b;
+}
+
+function syncSpliceVideoControls() {
+    const { a, b } = getSpliceVideoEls();
+    if (!a || !b) return;
+    const fg = getSpliceForegroundEl();
+    a.toggleAttribute("controls", a === fg);
+    b.toggleAttribute("controls", b === fg);
+}
+
+/** 在后台 video 上预解码下一段，片尾切换层时无需对前台换 src */
+function prefetchNextSpliceSegment() {
+    const bg = getSpliceBackgroundEl();
+    if (!bg || !state.timeline.length) return;
+    const nextIdx = findNextPlayableVideoIndex(state.timelineSelectedIndex);
+    if (nextIdx < 0) {
+        bg.removeAttribute("src");
+        delete bg.dataset.timelineIndex;
+        try {
+            bg.load();
+        } catch (_) { /* ignore */ }
+        return;
+    }
+    const u = resolveClipPlaybackUrl(state.timeline[nextIdx]);
+    if (!u) return;
+    if (bg.dataset.timelineIndex === String(nextIdx)) return;
+    bg.dataset.timelineIndex = String(nextIdx);
+    bg.src = u;
+    try {
+        bg.load();
+    } catch (_) { /* ignore */ }
+}
+
+/** 与素材库同步后的最新 url（时间轴里存的是加入时的快照） */
+function resolveClipPlaybackUrl(clip) {
+    if (!clip) return "";
+    const proj = state.activeProject;
+    if (proj && Array.isArray(proj.media)) {
+        const fresh = proj.media.find((m) => m.id === clip.id);
+        const raw = (fresh && fresh.url) || clip.url || "";
+        return raw ? resolveAssetPreviewUrl(String(raw)) : "";
+    }
+    const raw = clip.url || "";
+    return raw ? resolveAssetPreviewUrl(String(raw)) : "";
+}
+
+function formatSpliceTime(seconds) {
+    if (!Number.isFinite(seconds) || seconds < 0) return "00:00";
+    const m = Math.floor(seconds / 60);
+    const s = Math.floor(seconds % 60);
+    return String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0");
+}
+
+function updateSplicePreviewChrome() {
+    const v = getSpliceForegroundEl();
+    const t = document.getElementById("preview-time");
+    if (!t) return;
+    if (!state.timeline.length) {
+        t.textContent = "00:00 / 00:00";
+        return;
+    }
+    if (v && Number.isFinite(v.duration) && v.duration > 0) {
+        t.textContent = formatSpliceTime(v.currentTime) + " / " + formatSpliceTime(v.duration);
+        return;
+    }
+    let totalSecs = 0;
+    for (const c of state.timeline) totalSecs += parseDur(c.dur) || 10;
+    t.textContent = "00:00 / " + formatDuration(totalSecs);
+}
+
+function setSplicePlayButtonState(playing) {
+    const b = document.getElementById("play-btn");
+    if (!b) return;
+    const label = b.querySelector(".sp-transport-play-label");
+    const icon = b.querySelector(".sp-transport-play-icon");
+    if (playing) {
+        b.classList.add("is-playing");
+        if (label) label.textContent = "暂停";
+        if (icon) icon.textContent = "⏸";
+    } else {
+        b.classList.remove("is-playing");
+        if (label) label.textContent = "播放";
+        if (icon) icon.textContent = "▶";
+    }
+}
+
+function updateSpliceTransportLabels() {
+    const badge = document.getElementById("sp-clip-badge");
+    const nw = document.getElementById("sp-now-playing");
+    const n = state.timeline.length;
+    const i = state.timelineSelectedIndex;
+    if (badge) badge.textContent = n ? `${i + 1} / ${n}` : "— / —";
+    if (nw) {
+        nw.textContent =
+            n && state.timeline[i] ? String(state.timeline[i].name || "未命名") : "尚未选择片段";
+        if (n && state.timeline[i]) nw.title = String(state.timeline[i].name || "");
+        else nw.removeAttribute("title");
+    }
+}
+
+function onSplicePreviewEnded(ev) {
+    const endedEl = ev.target;
+    if (!(endedEl instanceof HTMLVideoElement)) return;
+    if (endedEl !== getSpliceForegroundEl()) return;
+    const nextIdx = findNextPlayableVideoIndex(state.timelineSelectedIndex);
+    if (nextIdx < 0) {
+        setSplicePlayButtonState(false);
+        updateSplicePreviewChrome();
+        return;
+    }
+    const fg = getSpliceForegroundEl();
+    const bg = getSpliceBackgroundEl();
+    if (!fg || !bg) return;
+    const nextSrc = resolveClipPlaybackUrl(state.timeline[nextIdx]);
+    if (!nextSrc) {
+        setSplicePlayButtonState(false);
+        return;
+    }
+    const proceed = () => {
+        state.timelineSelectedIndex = nextIdx;
+        document.querySelectorAll(".tl-clip").forEach((c) => c.classList.remove("selected"));
+        const clipEl = document.getElementById("clip-" + nextIdx);
+        if (clipEl) clipEl.classList.add("selected");
+        try {
+            fg.pause();
+        } catch (_) { /* ignore */ }
+        bg.currentTime = 0;
+        fg.classList.add("is-splice-buffer-back");
+        bg.classList.remove("is-splice-buffer-back");
+        syncSpliceVideoControls();
+        updateSpliceTransportLabels();
+        updateSplicePreviewChrome();
+        prefetchNextSpliceSegment();
+        const p = bg.play();
+        if (p !== undefined) p.catch(() => setSplicePlayButtonState(false));
+    };
+    const indexMatch = bg.dataset.timelineIndex === String(nextIdx);
+    if (indexMatch && (bg.src || bg.currentSrc)) {
+        if (bg.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+            proceed();
+        } else {
+            bg.addEventListener("canplay", proceed, { once: true });
+        }
+        return;
+    }
+    bg.dataset.timelineIndex = String(nextIdx);
+    bg.src = nextSrc;
+    bg.addEventListener("canplay", proceed, { once: true });
+    try {
+        bg.load();
+    } catch (_) { /* ignore */ }
+}
+
+function bindSplicePreviewVideoOnce() {
+    const { a, b } = getSpliceVideoEls();
+    if (!a || !b || a.dataset.spliceBound) return;
+    a.dataset.spliceBound = "1";
+    b.dataset.spliceBound = "1";
+    for (const v of [a, b]) {
+        v.addEventListener("timeupdate", (e) => {
+            if (e.target !== getSpliceForegroundEl()) return;
+            updateSplicePreviewChrome();
+        });
+        v.addEventListener("loadedmetadata", (e) => {
+            if (e.target !== getSpliceForegroundEl()) return;
+            updateSplicePreviewChrome();
+        });
+        v.addEventListener("play", (e) => {
+            if (e.target === getSpliceForegroundEl()) setSplicePlayButtonState(true);
+        });
+        v.addEventListener("pause", (e) => {
+            if (e.target === getSpliceForegroundEl()) setSplicePlayButtonState(false);
+        });
+        v.addEventListener("ended", onSplicePreviewEnded);
+    }
+    syncSpliceVideoControls();
+}
+
+/**
+ * 为当前索引加载 <video> 源；silent 时不弹 Toast（用于切换片段自动换源）。
+ */
+function ensureSpliceVideoForIndex(idx, opts = {}) {
+    const silent = !!opts.silent;
+    const { a, b } = getSpliceVideoEls();
+    const fg = getSpliceForegroundEl();
+    const ph = document.getElementById("preview-placeholder");
+    if (!fg || !state.timeline.length || idx < 0 || idx >= state.timeline.length) return false;
+    const clip = state.timeline[idx];
+    if (!isTimelineVideoClip(clip)) {
+        if (!silent) showToast("该片段不是视频，无法预览");
+        for (const v of [a, b]) {
+            if (!v) continue;
+            try {
+                v.pause();
+            } catch (_) { /* ignore */ }
+            v.removeAttribute("src");
+            delete v.dataset.timelineIndex;
+            v.style.display = "none";
+        }
+        if (ph) ph.style.display = "flex";
+        return false;
+    }
+    const src = resolveClipPlaybackUrl(clip);
+    if (!src) {
+        if (!silent) showToast("该视频暂无播放地址，请等待素材同步后重试");
+        for (const v of [a, b]) {
+            if (!v) continue;
+            try {
+                v.pause();
+            } catch (_) { /* ignore */ }
+            v.removeAttribute("src");
+            delete v.dataset.timelineIndex;
+            v.style.display = "none";
+        }
+        if (ph) ph.style.display = "flex";
+        return false;
+    }
+    if (a && b) {
+        a.style.display = "block";
+        b.style.display = "block";
+    }
+    if (fg.dataset.timelineIndex !== String(idx)) {
+        fg.src = src;
+        fg.dataset.timelineIndex = String(idx);
+    }
+    if (ph) ph.style.display = "none";
+    prefetchNextSpliceSegment();
+    syncSpliceVideoControls();
+    return true;
+}
+
 function renderTimeline() {
+    bindSplicePreviewVideoOnce();
     const row = document.getElementById('tl-video-row');
     const tray = document.getElementById('tray-items');
     const totalEl = document.getElementById('tray-total-dur');
+    const ph = document.getElementById('preview-placeholder');
+    const pv = document.getElementById('splice-preview-video');
+    const pvb = document.getElementById('splice-preview-video-b');
 
     if (!state.timeline.length) {
         row.innerHTML = `<div class="tl-add-zone" onclick="switchTab('project')">+ 从素材库添加</div>`;
         tray.innerHTML = '';
         totalEl.textContent = '0s';
-        document.getElementById('preview-placeholder').style.display = 'flex';
+        if (ph) ph.style.display = 'flex';
         document.getElementById('preview-controls').style.display = 'none';
+        if (pv) {
+            try {
+                pv.pause();
+            } catch (_) { /* ignore */ }
+            pv.removeAttribute('src');
+            delete pv.dataset.timelineIndex;
+            pv.style.display = 'none';
+            pv.classList.remove('is-splice-buffer-back');
+        }
+        if (pvb) {
+            try {
+                pvb.pause();
+            } catch (_) { /* ignore */ }
+            pvb.removeAttribute('src');
+            delete pvb.dataset.timelineIndex;
+            pvb.style.display = 'none';
+            pvb.classList.add('is-splice-buffer-back');
+        }
+        syncSpliceVideoControls();
+        state.timelineSelectedIndex = 0;
+        setSplicePlayButtonState(false);
+        updateSpliceTransportLabels();
+        updateSplicePreviewChrome();
         return;
     }
+
+    if (state.timelineSelectedIndex >= state.timeline.length) {
+        state.timelineSelectedIndex = state.timeline.length - 1;
+    }
+    if (state.timelineSelectedIndex < 0) state.timelineSelectedIndex = 0;
 
     let totalSecs = 0;
     row.innerHTML = state.timeline.map((c, i) => {
@@ -1186,19 +1687,34 @@ function renderTimeline() {
     ).join('');
 
     totalEl.textContent = formatDuration(totalSecs);
-    document.getElementById('preview-placeholder').style.display = 'none';
-    document.getElementById('preview-controls').style.display = 'flex';
-    document.getElementById('preview-time').textContent = '00:00 / ' + formatDuration(totalSecs);
+    document.getElementById('preview-controls').style.display = 'block';
+    ensureSpliceVideoForIndex(state.timelineSelectedIndex, { silent: true });
+    updateSplicePreviewChrome();
+    updateSpliceTransportLabels();
+    document.querySelectorAll('.tl-clip').forEach(c => c.classList.remove('selected'));
+    const sel = document.getElementById('clip-' + state.timelineSelectedIndex);
+    if (sel) sel.classList.add('selected');
 }
 
 function selectClip(i) {
+    if (i < 0 || i >= state.timeline.length) return;
+    state.timelineSelectedIndex = i;
     document.querySelectorAll('.tl-clip').forEach(c => c.classList.remove('selected'));
     const el = document.getElementById('clip-' + i);
     if (el) el.classList.add('selected');
+    ensureSpliceVideoForIndex(i, { silent: true });
+    updateSplicePreviewChrome();
+    updateSpliceTransportLabels();
+    prefetchNextSpliceSegment();
 }
 
 function removeClip(i) {
     state.timeline.splice(i, 1);
+    if (state.timelineSelectedIndex >= state.timeline.length) {
+        state.timelineSelectedIndex = Math.max(0, state.timeline.length - 1);
+    } else if (i < state.timelineSelectedIndex) {
+        state.timelineSelectedIndex--;
+    }
     renderTimeline();
 }
 
@@ -1236,16 +1752,47 @@ function zoomTimeline(dir) {
     renderTimeline();
 }
 
-let isPlaying = false;
 function previewToggle() {
-    isPlaying = !isPlaying;
-    document.getElementById('play-btn').textContent = isPlaying ? '⏸ 暂停' : '▶ 播放';
-    if (isPlaying) {
-        setTimeout(() => { isPlaying = false; document.getElementById('play-btn').textContent = '▶ 播放'; }, 3000);
+    bindSplicePreviewVideoOnce();
+    if (!state.timeline.length) {
+        showToast('请先添加片段');
+        return;
+    }
+    const idx = state.timelineSelectedIndex;
+    const v = getSpliceForegroundEl();
+    if (!ensureSpliceVideoForIndex(idx)) return;
+    if (v.paused) {
+        v.play().catch((e) => showToast('播放失败：' + (e && e.message ? e.message : String(e))));
+    } else {
+        v.pause();
     }
 }
-function seekPrev() { showToast('跳转到上一片段'); }
-function seekNext() { showToast('跳转到下一片段'); }
+
+function seekPrev() {
+    if (!state.timeline.length) return;
+    let i = state.timelineSelectedIndex - 1;
+    if (i < 0) i = state.timeline.length - 1;
+    const v = getSpliceForegroundEl();
+    const wasPlaying = v && !v.paused;
+    selectClip(i);
+    if (wasPlaying) {
+        const fg = getSpliceForegroundEl();
+        if (fg) fg.play().catch(() => {});
+    }
+}
+
+function seekNext() {
+    if (!state.timeline.length) return;
+    let i = state.timelineSelectedIndex + 1;
+    if (i >= state.timeline.length) i = 0;
+    const v = getSpliceForegroundEl();
+    const wasPlaying = v && !v.paused;
+    selectClip(i);
+    if (wasPlaying) {
+        const fg = getSpliceForegroundEl();
+        if (fg) fg.play().catch(() => {});
+    }
+}
 
 async function exportVideo() {
     if (!state.timeline.length) { showToast('请先添加视频片段'); return; }
@@ -1472,6 +2019,62 @@ function updateStats() {
     state.chatMsgs = n;
     document.getElementById('stat-msgs').textContent = String(n);
     document.getElementById('stat-tokens').textContent = '~' + (n * 180 + (Math.random() * 50 | 0));
+}
+
+// ===== DOUYIN =====
+
+async function submitDouyinFetch() {
+    if (!state.activeProject) {
+        showToast("请先选择一个项目");
+        return;
+    }
+    const ta = document.getElementById("dy-share-text");
+    const share = (ta?.value ?? "").trim();
+    if (!share) {
+        ta?.focus();
+        showToast("请粘贴分享链接或口令");
+        return;
+    }
+    const title = (document.getElementById("dy-video-title")?.value ?? "").trim();
+    const btn = document.getElementById("dy-fetch-btn");
+    const statusEl = document.getElementById("dy-status");
+    const v = document.getElementById("dy-preview-video");
+    const empty = document.getElementById("dy-preview-empty");
+    const stage = document.getElementById("dy-preview-stage");
+    const shell = document.getElementById("dy-video-shell");
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = "下载中…";
+    }
+    if (statusEl) statusEl.textContent = "正在解析并下载…";
+    try {
+        const r = await requestDouyinFetch({
+            project_id: String(state.activeProject.id),
+            share_text: share,
+            video_title: title,
+        });
+        const url = resolveAssetPreviewUrl(r.uri);
+        if (v && url) {
+            v.src = url;
+            stage?.classList.add("has-video");
+            if (shell) shell.hidden = false;
+            if (empty) empty.hidden = true;
+        }
+        if (statusEl) {
+            statusEl.textContent = "已保存到视频库 · " + new Date().toLocaleTimeString();
+        }
+        showToast("已写入视频库");
+        await refreshServerAssetsForActiveProject();
+    } catch (err) {
+        const msg = err && err.message ? err.message : String(err);
+        if (statusEl) statusEl.textContent = "失败：" + msg;
+        showToast("下载失败：" + msg);
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = "下载到视频库";
+        }
+    }
 }
 
 // ===== REVERSE =====
@@ -1784,6 +2387,7 @@ export function mountFrameOS() {
 
     bindChatToolbarScrollReveal();
     syncChatToolbarVisibility();
+    bindSplicePreviewVideoOnce();
 
     Object.assign(window, {
         switchTab,
@@ -1797,6 +2401,12 @@ export function mountFrameOS() {
         sortMedia,
         handleFileUpload,
         addToTimeline,
+        quickAddVideoToTimeline,
+        addAllVisibleVideosToTimeline,
+        toggleVideoBulkSelectFromEl,
+        selectAllVisibleVideosInLibrary,
+        clearLibraryBulkSelection,
+        addBulkSelectedVideosToTimelineAndGoSplice,
         analyzeSelected,
         deleteSelected,
         previewToggle,
@@ -1816,6 +2426,7 @@ export function mountFrameOS() {
         exportChat,
         copyText,
         analyzeVideo,
+        submitDouyinFetch,
         switchJsonView,
         copyJson,
         openNewProjectModal,
