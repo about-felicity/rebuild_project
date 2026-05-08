@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FrameOS — 视频工作流</title>
+    <link rel="stylesheet" href="css/workflow.css?v=13">
+</head>
+
+<body>
+
+    <div class="app">
+
+        <!-- SIDEBAR -->
+        <aside class="sidebar">
+            <div class="logo">
+                <span class="logo-title">FrameOS</span>
+                <span class="logo-badge">v0.1</span>
+            </div>
+
+            <nav class="nav-section">
+                <div class="nav-label">模块</div>
+                <button class="nav-item active" onclick="switchTab('agent')">
+                    <span class="nav-dot"></span> Agent 对话
+                </button>
+                <button class="nav-item" onclick="switchTab('project')">
+                    <span class="nav-dot"></span> 项目素材
+                </button>
+                <button class="nav-item" onclick="switchTab('splice')">
+                    <span class="nav-dot"></span> 视频拼接
+                </button>
+                <button class="nav-item" onclick="switchTab('reverse')">
+                    <span class="nav-dot"></span> 逆向提示词
+                </button>
+            </nav>
+
+            <div class="nav-section">
+                <div class="nav-label">项目</div>
+            </div>
+            <div class="projects-list" id="projects-list"></div>
+
+            <div class="sidebar-footer">
+                <button class="add-project-btn" onclick="openNewProjectModal()">+ 新建项目</button>
+            </div>
+        </aside>
+
+        <!-- MAIN -->
+        <main class="main">
+
+            <!-- TAB BAR -->
+            <div class="tabbar">
+                <button class="tab active" id="tab-agent" onclick="switchTab('agent')">Agent</button>
+                <button class="tab" id="tab-project" onclick="switchTab('project')">素材库</button>
+                <button class="tab" id="tab-splice" onclick="switchTab('splice')">拼接</button>
+                <button class="tab" id="tab-reverse" onclick="switchTab('reverse')">逆向</button>
+                <div class="tab-spacer"></div>
+                <span class="topbar-info" id="topbar-info">未选择项目</span>
+            </div>
+
+            <!-- AGENT PANEL -->
+            <section class="panel active" id="panel-agent">
+                <div class="agent-layout">
+
+                    <div class="chat-area">
+                        <header class="chat-toolbar" id="chat-session-toolbar" aria-label="会话信息">
+                            <div class="chat-toolbar-left">
+                                <span class="chat-toolbar-kicker">Session</span>
+                                <h2 class="chat-toolbar-title">对话</h2>
+                                <p class="chat-toolbar-desc">消息随项目保存在服务端；本机项目列表在浏览器。点「会话与数据」可清空对话或重置本机缓存。</p>
+                            </div>
+                            <div class="chat-toolbar-actions">
+                                <button type="button" class="chat-action-btn chat-action-btn--solid" onclick="openLocalDataPanel()"
+                                    title="清空当前项目对话，或管理本机项目列表与浏览器缓存">删除会话与数据</button>
+                            </div>
+                        </header>
+                        <div class="chat-messages-wrap">
+                            <div class="chat-messages" id="chat-messages"></div>
+                            <button type="button" class="chat-scroll-top-btn" id="chat-scroll-top-btn"
+                                onclick="scrollChatToTop()" aria-label="回到顶部" title="回到顶部">顶部</button>
+                        </div>
+
+                        <div class="chat-input-area">
+                            <div class="chat-presets">
+                                <button class="chat-preset" onclick="sendPreset('生成 Sora 提示词')">Sora 提示词</button>
+                                <button class="chat-preset" onclick="sendPreset('分析视频节奏与剪辑点')">节奏分析</button>
+                                <button class="chat-preset" onclick="sendPreset('推荐 BGM 风格')">BGM 建议</button>
+                                <button class="chat-preset" onclick="sendPreset('生成字幕文案')">字幕文案</button>
+                                <button class="chat-preset" onclick="sendPreset('视频分镜脚本')">分镜脚本</button>
+                            </div>
+                            <div class="chat-input-row">
+                                <textarea class="chat-input" id="chat-input" rows="2" placeholder="描述你的视频创作需求..."
+                                    onkeydown="handleChatKey(event)"></textarea>
+                                <button class="send-btn" onclick="sendChatMessage()">发送</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <aside class="agent-sidebar">
+                        <div class="agent-sidebar-section">
+                            <div class="section-label">当前上下文</div>
+                            <div id="context-chips">
+                                <div class="context-chip" style="color:var(--muted);font-size:0.6rem;">暂无项目上下文</div>
+                            </div>
+                        </div>
+
+                        <div class="agent-sidebar-section">
+                            <div class="section-label">模型</div>
+                            <select class="model-select">
+                                <option>Claude Sonnet 4</option>
+                                <option>Claude Haiku 4.5</option>
+                                <option>GPT-4o</option>
+                                <option>Gemini 1.5 Pro</option>
+                            </select>
+                        </div>
+
+                        <div class="agent-sidebar-section">
+                            <div class="section-label">会话统计</div>
+                            <div class="stat-row"><span>消息</span><span id="stat-msgs">0</span></div>
+                            <div class="stat-row"><span>Token 估算</span><span id="stat-tokens">~380</span></div>
+                            <div class="stat-row"><span>会话时长</span><span id="stat-time">00:00</span></div>
+                        </div>
+
+                        <div class="agent-sidebar-section">
+                            <div class="section-label">会话</div>
+                            <div class="sidebar-stack">
+                                <button type="button" class="sidebar-action" onclick="openLocalDataPanel()">
+                                    <span class="sidebar-action-mark" aria-hidden="true"></span>
+                                    <span class="sidebar-action-text">
+                                        <span class="sidebar-action-title">会话与数据</span>
+                                        <span class="sidebar-action-sub">清空对话 · 本机重置</span>
+                                    </span>
+                                </button>
+                                <button type="button" class="sidebar-action sidebar-action--minimal" onclick="exportChat()">
+                                    <span class="sidebar-action-mark" aria-hidden="true"></span>
+                                    <span class="sidebar-action-text">
+                                        <span class="sidebar-action-title">导出对话</span>
+                                        <span class="sidebar-action-sub">演示</span>
+                                    </span>
+                                </button>
+                            </div>
+                        </div>
+                    </aside>
+
+                </div>
+            </section>
+
+            <!-- PROJECT PANEL -->
+            <section class="panel" id="panel-project">
+                <div class="project-layout">
+                    <div class="media-grid-area">
+
+                        <div class="media-toolbar">
+                            <span class="media-toolbar-title" id="project-panel-title">选择项目</span>
+                            <div class="filter-tabs">
+                                <button class="filter-tab active" onclick="filterMedia('all',this)">全部</button>
+                                <button class="filter-tab" onclick="filterMedia('video',this)">视频库</button>
+                                <button class="filter-tab" onclick="filterMedia('asset',this)">素材库</button>
+                                <button class="filter-tab" onclick="filterMedia('storyboard',this)">分镜库</button>
+                            </div>
+                            <div class="toolbar-spacer"></div>
+                            <button class="toolbar-btn" onclick="sortMedia()">排序</button>
+                            <button class="toolbar-btn primary"
+                                onclick="document.getElementById('file-upload').click()">+ 导入素材</button>
+                            <input type="file" id="file-upload" multiple accept="video/*,image/*,audio/*"
+                                onchange="handleFileUpload(event)">
+                        </div>
+
+                        <div class="media-grid" id="media-grid">
+                            <div
+                                style="grid-column:1/-1;padding:2rem;text-align:center;color:var(--muted);font-size:0.6875rem;letter-spacing:0.06em;">
+                                ← 从左侧选择项目，或新建项目开始
+                            </div>
+                        </div>
+                    </div>
+
+                    <aside class="media-detail" id="media-detail" style="display:none;">
+                        <div class="detail-header">
+                            <span class="detail-title" id="detail-filename">—</span>
+                            <button class="detail-close" onclick="closeMediaDetail()">✕</button>
+                        </div>
+                        <div class="detail-preview" id="detail-preview">PREVIEW</div>
+                        <div class="detail-section" id="detail-meta"></div>
+                        <div class="detail-section">
+                            <div class="section-label"
+                                style="font-size:0.5rem;letter-spacing:0.14em;text-transform:uppercase;color:var(--muted);margin-bottom:0.25rem;">
+                                操作</div>
+                            <div style="display:flex;flex-direction:column;gap:0.35rem;">
+                                <button type="button" class="toolbar-btn detail-lightbox-btn" id="detail-btn-lightbox"
+                                    style="display:none;" onclick="openMediaLightboxFromDetail()">浏览大图</button>
+                                <button class="toolbar-btn" onclick="addToTimeline()">加入拼接时间轴</button>
+                                <button class="toolbar-btn" onclick="analyzeSelected()">分析提示词</button>
+                                <button class="toolbar-btn"
+                                    style="color:var(--accent-neg);border-color:color-mix(in oklab,var(--accent-neg) 40%,var(--bg));"
+                                    onclick="deleteSelected()">删除素材</button>
+                            </div>
+                        </div>
+                    </aside>
+                </div>
+            </section>
+
+            <!-- SPLICE PANEL -->
+            <section class="panel" id="panel-splice">
+                <div class="splice-layout">
+
+                    <div class="splice-preview-area">
+                        <div class="splice-preview-main" id="splice-preview">
+                            <div class="preview-placeholder" id="preview-placeholder">
+                                <div class="preview-placeholder-icon">▶</div>
+                                <div class="preview-placeholder-text">无预览 · 请先添加片段</div>
+                            </div>
+                            <div class="preview-controls" id="preview-controls" style="display:none;">
+                                <button class="ctrl-btn" onclick="previewToggle()" id="play-btn">▶ 播放</button>
+                                <button class="ctrl-btn" onclick="seekPrev()">⏮ 上一片段</button>
+                                <button class="ctrl-btn" onclick="seekNext()">下一片段 ⏭</button>
+                                <span class="preview-time" id="preview-time">00:00 / 00:00</span>
+                            </div>
+                        </div>
+
+                        <div class="splice-clip-tray">
+                            <div class="tray-header">
+                                <span>片段列表</span>
+                                <span id="tray-total-dur">0s</span>
+                            </div>
+                            <div id="tray-items"></div>
+                            <div
+                                style="padding:0.5rem 0.75rem;margin-top:auto;border-top:var(--hairline) solid var(--border);">
+                                <button class="toolbar-btn" style="width:100%;" onclick="clearTimeline()">清空时间轴</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="timeline-area">
+                        <div class="timeline-toolbar">
+                            <span class="timeline-label">时间轴</span>
+                            <div class="tl-zoom">
+                                <button class="tl-zoom-btn" onclick="zoomTimeline(-1)">−</button>
+                                <button class="tl-zoom-btn" onclick="zoomTimeline(1)">+</button>
+                            </div>
+                            <button class="toolbar-btn" onclick="autoArrange()">自动排列</button>
+                            <button class="toolbar-btn" onclick="addTransition()">添加转场</button>
+                        </div>
+
+                        <div class="timeline-scroll">
+                            <div style="display:flex;flex-direction:column;gap:6px;padding-bottom:0.5rem;">
+                                <div class="timeline-track">
+                                    <span class="tl-track-label">VIDEO</span>
+                                    <div class="tl-clips-row" id="tl-video-row">
+                                        <div class="tl-add-zone" onclick="switchTab('project')">+ 从素材库添加</div>
+                                    </div>
+                                </div>
+                                <div class="timeline-track">
+                                    <span class="tl-track-label">AUDIO</span>
+                                    <div class="tl-clips-row" id="tl-audio-row">
+                                        <div class="tl-add-zone" onclick="switchTab('project')">+ 添加音频</div>
+                                    </div>
+                                </div>
+                                <div class="timeline-track">
+                                    <span class="tl-track-label">TEXT</span>
+                                    <div class="tl-clips-row" id="tl-text-row">
+                                        <div class="tl-add-zone" onclick="addTextClip()">+ 添加字幕</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="timeline-settings">
+                            <div class="setting-group">
+                                <span class="setting-label">分辨率</span>
+                                <select class="setting-select" id="res-select">
+                                    <option>1920×1080</option>
+                                    <option>1280×720</option>
+                                    <option>3840×2160</option>
+                                    <option>1080×1920</option>
+                                    <option>1080×1080</option>
+                                </select>
+                            </div>
+                            <div class="setting-group">
+                                <span class="setting-label">帧率</span>
+                                <select class="setting-select">
+                                    <option>24fps</option>
+                                    <option>30fps</option>
+                                    <option>60fps</option>
+                                </select>
+                            </div>
+                            <div class="setting-group">
+                                <span class="setting-label">格式</span>
+                                <select class="setting-select">
+                                    <option>MP4 (H.264)</option>
+                                    <option>MOV (ProRes)</option>
+                                    <option>WebM (VP9)</option>
+                                </select>
+                            </div>
+                            <div class="setting-group">
+                                <span class="setting-label">转场</span>
+                                <select class="setting-select" id="transition-select">
+                                    <option>淡入淡出</option>
+                                    <option>交叉溶解</option>
+                                    <option>切换</option>
+                                    <option>滑动</option>
+                                    <option>无</option>
+                                </select>
+                            </div>
+                            <button class="export-btn" onclick="exportVideo()">导出视频 →</button>
+                        </div>
+                    </div>
+
+                </div>
+            </section>
+
+            <!-- REVERSE PANEL -->
+            <section class="panel" id="panel-reverse">
+                <div class="reverse-layout">
+
+                    <div class="reverse-input-col">
+                        <div class="reverse-col-header">
+                            <div class="reverse-col-title">逆向提示词</div>
+                            <div class="reverse-col-desc">输入视频描述或上传素材，自动生成分镜、台词、描述 JSON</div>
+                        </div>
+                        <div class="reverse-body">
+
+                            <div class="rev-field">
+                                <label class="rev-label">视频描述 / 场景概述</label>
+                                <textarea class="rev-textarea" id="rev-desc" rows="4"
+                                    placeholder="例：一段城市夜晚街景的延时摄影，霓虹灯光流动，行人穿梭..."></textarea>
+                            </div>
+
+                            <div class="rev-field">
+                                <label class="rev-label">视频风格</label>
+                                <select class="rev-select" id="rev-style">
+                                    <option>写实纪录</option>
+                                    <option>电影感</option>
+                                    <option>广告商业</option>
+                                    <option>短视频竖屏</option>
+                                    <option>纪录片</option>
+                                    <option>音乐 MV</option>
+                                    <option>婚礼纪录</option>
+                                    <option>旅行 Vlog</option>
+                                </select>
+                            </div>
+
+                            <div class="rev-field">
+                                <label class="rev-label">目标平台</label>
+                                <select class="rev-select" id="rev-platform">
+                                    <option>Sora (OpenAI)</option>
+                                    <option>Runway Gen-3</option>
+                                    <option>Kling AI</option>
+                                    <option>ComfyUI</option>
+                                    <option>剪映 AI</option>
+                                    <option>通用提示词</option>
+                                </select>
+                            </div>
+
+                            <div class="rev-field">
+                                <label class="rev-label">分镜数量</label>
+                                <select class="rev-select" id="rev-scenes">
+                                    <option>3 个分镜</option>
+                                    <option>5 个分镜</option>
+                                    <option>8 个分镜</option>
+                                    <option>12 个分镜</option>
+                                </select>
+                            </div>
+
+                            <div class="rev-field">
+                                <label class="rev-label">输出字段</label>
+                                <div class="output-options">
+                                    <label class="output-opt active" id="opt-shot"><input type="checkbox" checked>
+                                        分镜描述</label>
+                                    <label class="output-opt active" id="opt-prompt"><input type="checkbox" checked>
+                                        提示词</label>
+                                    <label class="output-opt active" id="opt-dialogue"><input type="checkbox" checked>
+                                        台词</label>
+                                    <label class="output-opt active" id="opt-camera"><input type="checkbox" checked>
+                                        运镜</label>
+                                    <label class="output-opt" id="opt-color"><input type="checkbox"> 调色</label>
+                                    <label class="output-opt" id="opt-bgm"><input type="checkbox"> BGM</label>
+                                </div>
+                            </div>
+
+                            <button class="analyze-btn" id="analyze-btn" onclick="analyzeVideo()">生成分镜 JSON →</button>
+                            <div style="font-size:0.5625rem;color:var(--muted);letter-spacing:0.06em;" id="rev-status">
+                                待分析</div>
+
+                        </div>
+                    </div>
+
+                    <div class="reverse-output-col">
+                        <div class="json-toolbar">
+                            <span class="json-label">输出结果</span>
+                            <span class="json-status idle" id="json-status">待生成</span>
+                            <div class="json-view-tabs">
+                                <button class="json-view-tab active"
+                                    onclick="switchJsonView('visual',this)">可视化</button>
+                                <button class="json-view-tab" onclick="switchJsonView('raw',this)">JSON 原文</button>
+                            </div>
+                            <button class="json-copy-btn" onclick="copyJson()">复制 JSON</button>
+                        </div>
+
+                        <div class="json-content active" id="json-visual">
+                            <div class="json-visual" id="visual-content">
+                                <div
+                                    style="display:flex;align-items:center;justify-content:center;height:200px;color:var(--muted);font-size:0.6875rem;letter-spacing:0.06em;flex-direction:column;gap:0.5rem;">
+                                    <div style="font-size:1.5rem;opacity:0.3;">{ }</div>
+                                    <div>填写左侧描述后点击「生成分镜 JSON」</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="json-content" id="json-raw">
+                            <div class="json-raw" id="raw-content">// 等待生成...</div>
+                        </div>
+                    </div>
+
+                </div>
+            </section>
+
+        </main>
+    </div>
+
+    <!-- NEW PROJECT MODAL -->
+    <div class="modal-overlay" id="modal-overlay">
+        <div class="modal">
+            <div class="modal-title">新建项目</div>
+            <div class="modal-field">
+                <label class="modal-label">项目名称</label>
+                <input class="modal-input" id="new-proj-name" placeholder="例：城市夜景延时">
+            </div>
+            <div class="modal-field">
+                <label class="modal-label">项目颜色</label>
+                <div class="color-swatches" id="color-swatches">
+                    <div class="color-swatch active" style="background:#3a6e00;" data-color="#3a6e00"
+                        onclick="selectColor(this)"></div>
+                    <div class="color-swatch" style="background:#005a8a;" data-color="#005a8a"
+                        onclick="selectColor(this)"></div>
+                    <div class="color-swatch" style="background:#7a4800;" data-color="#7a4800"
+                        onclick="selectColor(this)"></div>
+                    <div class="color-swatch" style="background:#8a0000;" data-color="#8a0000"
+                        onclick="selectColor(this)"></div>
+                    <div class="color-swatch" style="background:#5a005a;" data-color="#5a005a"
+                        onclick="selectColor(this)"></div>
+                    <div class="color-swatch" style="background:#555;" data-color="#555;" onclick="selectColor(this)">
+                    </div>
+                </div>
+            </div>
+            <div class="modal-field">
+                <label class="modal-label">项目描述（可选）</label>
+                <input class="modal-input" id="new-proj-desc" placeholder="简短描述这个项目">
+            </div>
+            <div class="modal-actions">
+                <button class="modal-cancel" onclick="closeModal()">取消</button>
+                <button class="modal-confirm" onclick="createProject()">创建</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- LOCAL DATA PANEL -->
+    <div class="modal-overlay" id="local-data-overlay">
+        <div class="modal modal--wide">
+            <div class="modal-eyebrow">Session · 本机</div>
+            <div class="modal-title">会话与数据</div>
+            <p class="modal-lead">
+                下方两项<strong>不同</strong>：<strong>清空本会话</strong>只影响当前项目在服务器与本页的对话；<strong>重置工作台</strong>只清浏览器里的项目列表与偏好，不删服务器上的聊天记录。
+            </p>
+            <div class="data-panel-grid">
+                <button type="button" class="data-panel-card" onclick="clearChatFromPanel()">
+                    <span class="data-panel-card-kicker">当前项目</span>
+                    <span class="data-panel-card-title">清空本会话</span>
+                    <span class="data-panel-card-body">移除服务器上该项目的 Agent 历史，并清空本页消息列表。</span>
+                </button>
+                <button type="button" class="data-panel-card data-panel-card--emphasis" onclick="confirmResetBrowserWorkspace()">
+                    <span class="data-panel-card-kicker">本机</span>
+                    <span class="data-panel-card-title">重置工作台</span>
+                    <span class="data-panel-card-body">清除 localStorage / sessionStorage 中的项目与偏好，本机项目列表将清空。
+                        不会删除服务器数据库里的聊天记录。</span>
+                </button>
+            </div>
+            <div class="modal-actions modal-actions--spread">
+                <button type="button" class="modal-cancel" onclick="closeLocalDataPanel()">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 素材库大图预览 -->
+    <div id="media-lightbox-overlay" class="media-lightbox" style="display:none;" aria-hidden="true">
+        <button type="button" class="media-lightbox-backdrop" onclick="closeMediaLightbox()" aria-label="关闭预览"></button>
+        <figure class="media-lightbox-inner">
+            <button type="button" class="media-lightbox-close" onclick="closeMediaLightbox()" aria-label="关闭">✕</button>
+            <img id="media-lightbox-img" class="media-lightbox-img" alt="" decoding="async" referrerpolicy="no-referrer" />
+            <figcaption id="media-lightbox-caption" class="media-lightbox-caption"></figcaption>
+        </figure>
+    </div>
+
+    <script type="module" src="js/main.js"></script>
+</body>
+
+</html>
