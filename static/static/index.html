@@ -3,9 +3,17 @@
 
 <head>
     <meta charset="UTF-8">
+    <!-- 无尾部 / 时相对路径 js/main.js 会错解析到 /js/… 导致白屏；须先于其它资源执行 -->
+    <script>
+        (function () {
+            if (location.pathname === "/app") {
+                location.replace("/app/" + location.search + location.hash);
+            }
+        })();
+    </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FrameOS — 视频工作流</title>
-    <link rel="stylesheet" href="css/workflow.css?v=19">
+    <link rel="stylesheet" href="css/workflow.css?v=22">
 </head>
 
 <body>
@@ -33,6 +41,9 @@
                 <button class="nav-item" onclick="switchTab('douyin')">
                     <span class="nav-dot"></span> 抖音视频
                 </button>
+                <button class="nav-item" onclick="switchTab('storyboard')">
+                    <span class="nav-dot"></span> 分镜流水线
+                </button>
                 <button class="nav-item" onclick="switchTab('splice')">
                     <span class="nav-dot"></span> 视频拼接
                 </button>
@@ -57,6 +68,7 @@
                 <button class="tab" id="tab-project" onclick="switchTab('project')">素材库</button>
                 <button class="tab" id="tab-reverse" onclick="switchTab('reverse')">逆向</button>
                 <button class="tab" id="tab-douyin" onclick="switchTab('douyin')">抖音</button>
+                <button class="tab" id="tab-storyboard" onclick="switchTab('storyboard')">分镜</button>
                 <button class="tab" id="tab-splice" onclick="switchTab('splice')">拼接</button>
                 <div class="tab-spacer"></div>
                 <span class="topbar-info" id="topbar-info">未选择项目</span>
@@ -74,6 +86,9 @@
                                 <p class="chat-toolbar-desc">消息随项目保存在服务端；本机项目列表在浏览器。点「会话与数据」可清空对话或重置本机缓存。</p>
                             </div>
                             <div class="chat-toolbar-actions">
+                                <button type="button" class="chat-action-btn chat-action-btn--outline" id="agent-mode-toggle"
+                                    onclick="toggleAgentCreativeMode()" disabled aria-pressed="false"
+                                    title="按项目切换：抽象模式 = 互联网鬼才广告导演 persona">正常模式</button>
                                 <button type="button" class="chat-action-btn chat-action-btn--solid" onclick="openLocalDataPanel()"
                                     title="清空当前项目对话，或管理本机项目列表与浏览器缓存">删除会话与数据</button>
                             </div>
@@ -167,6 +182,10 @@
                             <button type="button" class="toolbar-btn" onclick="selectAllVisibleVideosInLibrary()" title="勾选当前列表中全部可播放的视频">全选视频</button>
                             <button type="button" class="toolbar-btn" onclick="clearLibraryBulkSelection()" title="清除素材库中的批量勾选">清除勾选</button>
                             <button type="button" class="toolbar-btn primary" onclick="addBulkSelectedVideosToTimelineAndGoSplice()" title="将勾选的视频加入拼接时间轴并打开拼接页">选中入轨并拼接</button>
+                            <button type="button" class="toolbar-btn"
+                                onclick="void deleteSelected()"
+                                title="删除当前选中的素材（详情侧栏同操作）；已同步服务器的会一并删库与文件"
+                                style="color:var(--accent-neg);border-color:color-mix(in oklab,var(--accent-neg) 40%,var(--bg));">删除所选素材</button>
                             <button type="button" class="toolbar-btn" onclick="sortMedia()">排序</button>
                             <button type="button" class="toolbar-btn" onclick="addAllVisibleVideosToTimeline()" title="将当前列表中尚未入轨的视频全部加入拼接时间轴">全部视频入轨</button>
                             <button type="button" class="toolbar-btn primary"
@@ -201,7 +220,7 @@
                                 <button class="toolbar-btn" onclick="analyzeSelected()">分析提示词</button>
                                 <button class="toolbar-btn"
                                     style="color:var(--accent-neg);border-color:color-mix(in oklab,var(--accent-neg) 40%,var(--bg));"
-                                    onclick="deleteSelected()">删除素材</button>
+                                    onclick="void deleteSelected()">删除素材</button>
                             </div>
                         </div>
                     </aside>
@@ -369,6 +388,92 @@
                                     <span class="dy-player-footer-hint" id="dy-player-footer-hint">竖屏或横屏视频将自动适配画幅</span>
                                 </footer>
                             </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- STORYBOARD PIPELINE PANEL -->
+            <section class="panel" id="panel-storyboard">
+                <div class="storyboard-layout">
+                    <div class="storyboard-form-col">
+                        <div class="douyin-col-header">
+                            <div class="douyin-col-title">分镜流水线</div>
+                            <div class="douyin-col-desc">接入 <code>demo/storyboard_pipeline</code>：产品图分析 → 剧本扩写 → 场景细化 → 分镜 JSON；可选万相逐镜出图。结果写入<strong>当前选中项目</strong>的服务端目录，并在「素材库 → 分镜库」中登记。</div>
+                        </div>
+                        <div class="storyboard-body">
+                            <div class="rev-field">
+                                <label class="rev-label" for="sb-description">一句话视频需求</label>
+                                <textarea class="rev-textarea" id="sb-description" rows="3"
+                                    placeholder="例：一个疲惫的打工人深夜独自加班，突然发现了改变一切的产品"></textarea>
+                            </div>
+                            <div class="rev-field">
+                                <label class="rev-label" for="sb-hotword">热点词（融入叙事）</label>
+                                <input type="text" class="modal-input" id="sb-hotword" style="width:100%;box-sizing:border-box;"
+                                    placeholder="例：打工人">
+                            </div>
+                            <div class="rev-field">
+                                <label class="rev-label">产品图（1–3 张）</label>
+                                <div id="sb-image-picks" class="sb-image-picks" aria-live="polite"></div>
+                                <div class="sb-image-pick-actions">
+                                    <button type="button" class="toolbar-btn" onclick="openStoryboardLibraryPicker()">从素材库选择</button>
+                                    <button type="button" class="toolbar-btn" onclick="document.getElementById('sb-product-images').click()">本地上传</button>
+                                    <input type="file" id="sb-product-images" accept="image/jpeg,image/png,image/webp,image/gif" multiple hidden onchange="onStoryboardLocalFilesPicked(event)">
+                                </div>
+                                <p class="storyboard-hint">可从当前项目<strong>素材库</strong>勾选栅格图片，或本地上传；合计 1–3 张。Vision 会读<strong>全部</strong>图做策划；万相生图<strong>只锁一张</strong>产品外观，默认由 Step0 从多张里识别「包装/瓶身」主图（人物/场景图勿放在第一位更易判对）。</p>
+                            </div>
+                            <div class="rev-field">
+                                <label class="rev-label" for="sb-wan-ref-index">万相参考图（可选）</label>
+                                <select class="rev-select" id="sb-wan-ref-index" style="width:100%;box-sizing:border-box;">
+                                    <option value="" selected>自动识别产品主图（推荐）</option>
+                                    <option value="0">强制第 1 张</option>
+                                    <option value="1">强制第 2 张</option>
+                                    <option value="2">强制第 3 张</option>
+                                </select>
+                                <p class="storyboard-hint" style="margin-top:0.35rem;">顺序与上方已选图片列表一致；仅当自动识别不准时改此项。</p>
+                            </div>
+                            <div class="rev-field">
+                                <label class="rev-label" for="sb-style">影像风格</label>
+                                <input type="text" class="modal-input" id="sb-style" style="width:100%;box-sizing:border-box;" value="写实">
+                            </div>
+                            <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;">
+                                <div class="rev-field">
+                                    <label class="rev-label" for="sb-fps">帧率</label>
+                                    <select class="rev-select" id="sb-fps">
+                                        <option value="24" selected>24 fps</option>
+                                        <option value="30">30 fps</option>
+                                    </select>
+                                </div>
+                                <div class="rev-field">
+                                    <label class="rev-label" for="sb-duration">目标片长（秒）</label>
+                                    <input type="number" class="modal-input" id="sb-duration" min="10" max="180" value="30" style="width:100%;box-sizing:border-box;">
+                                </div>
+                            </div>
+                            <div class="rev-field">
+                                <label class="rev-label" for="sb-gen-images">出图</label>
+                                <select class="rev-select" id="sb-gen-images">
+                                    <option value="true">生成镜头图（万相 · 需 DASHSCOPE_API_KEY）</option>
+                                    <option value="false">仅 JSON + Markdown 脚本（更快）</option>
+                                </select>
+                            </div>
+                            <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+                                <button type="button" class="analyze-btn" id="sb-run-btn" onclick="submitStoryboardPipeline()">开始生成分镜</button>
+                                <button type="button" class="toolbar-btn" id="sb-cancel-btn" onclick="cancelStoryboardPipeline()" style="display:none;">取消</button>
+                            </div>
+                            <p class="storyboard-hint" id="sb-form-status" aria-live="polite"></p>
+                        </div>
+                    </div>
+                    <div class="storyboard-progress-col">
+                        <div class="storyboard-progress-head">
+                            <span class="json-label">过程</span>
+                            <div style="display:flex;gap:0.35rem;">
+                                <button type="button" class="toolbar-btn" onclick="openStoryboardLibraryInProject()">打开分镜库</button>
+                            </div>
+                        </div>
+                        <div class="storyboard-progress-log" id="sb-progress-log"></div>
+                        <div class="storyboard-result" id="sb-result-box" hidden>
+                            <div class="section-label" style="font-size:0.5rem;margin-bottom:0.35rem;color:var(--muted);letter-spacing:0.12em;text-transform:uppercase;">本轮产出链接</div>
+                            <div class="storyboard-result-links" id="sb-result-links"></div>
                         </div>
                     </div>
                 </div>
@@ -553,6 +658,19 @@
         </div>
     </div>
 
+    <!-- STORYBOARD: pick images from project asset library -->
+    <div class="modal-overlay" id="sb-pick-overlay">
+        <div class="modal modal--wide">
+            <div class="modal-title">从素材库选择产品图</div>
+            <p class="storyboard-hint" style="margin:0;">仅列出当前项目中「素材库」里的栅格图片；与「本地上传」合计最多 3 张。</p>
+            <div id="sb-pick-grid" class="sb-pick-grid"></div>
+            <div class="modal-actions">
+                <button type="button" class="modal-cancel" onclick="closeStoryboardLibraryPicker()">关闭</button>
+                <button type="button" class="modal-confirm" onclick="confirmStoryboardLibraryPicker()">添加已选</button>
+            </div>
+        </div>
+    </div>
+
     <!-- LOCAL DATA PANEL -->
     <div class="modal-overlay" id="local-data-overlay">
         <div class="modal modal--wide">
@@ -590,7 +708,7 @@
         </figure>
     </div>
 
-    <script type="module" src="js/main.js"></script>
+    <script type="module" src="js/main.js?v=22"></script>
 </body>
 
 </html>

@@ -6,9 +6,10 @@ import {
     fetchChatProjectIds,
     requestAgentReply,
 } from "../api/agent.js";
-import { deleteProjectRemote, fetchProjectAssets } from "../api/projects.js";
+import { deleteProjectAssetRemote, deleteProjectRemote, fetchProjectAssets } from "../api/projects.js";
 import { requestStoryboardJson } from "../api/analysis.js";
 import { requestDouyinFetch } from "../api/douyin.js";
+import { streamStoryboardPipeline } from "../api/storyboard.js";
 import { requestExportVideo } from "../api/splice.js";
 import { escHtml, escAttr, formatSize, parseDur, formatDuration } from "../utils/helpers.js";
 
@@ -17,12 +18,93 @@ const LS_PROJECTS = "frameos_projects";
 const SS_ACTIVE_PROJECT = "frameos_active_project_id";
 /** 与 sessionStorage 同源策略不同：localhost / 127.0.0.1 各自一份 session，用 localStorage 备份上次项目 id */
 const LS_ACTIVE_PROJECT = "frameos_active_project_id";
+/** 各项目 Agent 模式：{ [projectId]: "normal" | "abstract" } */
+const LS_AGENT_MODE = "frameos_agent_mode_by_project";
 
 /** 与后端约定：video | asset | storyboard；生成物必须带 library 并与 project_id 绑定 */
 const MEDIA_LIB_LABEL = { video: "视频库", asset: "素材库", storyboard: "分镜库" };
 
 /** 与 sendChatMessage / renderChatForProject 共用，便于切换项目后还原「正在输入」 */
 const CHAT_TYPING_DOM_ID = "active-agent-typing";
+
+function getAgentModeForProject(projectId) {
+    const k = String(projectId ?? "");
+    if (!k) return "normal";
+    try {
+        const raw = localStorage.getItem(LS_AGENT_MODE);
+        if (!raw) return "normal";
+        const o = JSON.parse(raw);
+        if (!o || typeof o !== "object" || Array.isArray(o)) return "normal";
+        return o[k] === "abstract" ? "abstract" : "normal";
+    } catch {
+        return "normal";
+    }
+}
+
+function setAgentModeForProject(projectId, mode) {
+    const k = String(projectId ?? "");
+    if (!k) return;
+    let o = {};
+    try {
+        const raw = localStorage.getItem(LS_AGENT_MODE);
+        if (raw) {
+            const p = JSON.parse(raw);
+            if (p && typeof p === "object" && !Array.isArray(p)) o = p;
+        }
+    } catch {
+        o = {};
+    }
+    o[k] = mode === "abstract" ? "abstract" : "normal";
+    try {
+        localStorage.setItem(LS_AGENT_MODE, JSON.stringify(o));
+    } catch (e) {
+        console.warn("FrameOS: agent mode persist failed", e);
+    }
+}
+
+function syncAgentModeToggleUi() {
+    const btn = document.getElementById("agent-mode-toggle");
+    if (!btn) return;
+    const p = state.activeProject;
+    const mode = p ? getAgentModeForProject(p.id) : "normal";
+    btn.textContent = mode === "abstract" ? "抽象模式" : "正常模式";
+    btn.setAttribute("aria-pressed", mode === "abstract" ? "true" : "false");
+    btn.classList.toggle("agent-mode-toggle--abstract", mode === "abstract");
+    btn.disabled = !p;
+    btn.title =
+        mode === "abstract"
+            ? "当前：互联网抽象广告导演；点击切回正常模式（按项目保存）"
+            : "点击切换为抽象广告导演模式：强反差、meme 向短片创意（按项目保存）";
+}
+
+function toggleAgentCreativeMode() {
+    if (!state.activeProject) {
+        showToast("请先选择一个项目");
+        return;
+    }
+    const cur = getAgentModeForProject(state.activeProject.id);
+    const next = cur === "abstract" ? "normal" : "abstract";
+    setAgentModeForProject(state.activeProject.id, next);
+    syncAgentModeToggleUi();
+    showToast(next === "abstract" ? "已开启抽象模式（本项目的下一条消息起生效）" : "已切回正常模式");
+}
+
+let storyboardStreamAbort = null;
+
+/** 分镜流水线产品图：素材库 + 本地上传，合计 1–3 张 */
+let storyboardPipelinePicks = [];
+/** 「从素材库选择」弹窗内临时勾选，元素为 String(mediaId) */
+let storyboardPickerTempSelected = new Set();
+
+function applyStoryboardServerMeta(hit, meta) {
+    if (!hit || !meta || typeof meta !== "object") return;
+    if (meta.script_uri != null) hit.scriptUri = String(meta.script_uri);
+    if (meta.run_id != null) hit.runId = String(meta.run_id);
+    if (meta.shot_count != null) {
+        const n = Number(meta.shot_count);
+        if (Number.isFinite(n)) hit.shotCount = n;
+    }
+}
 
 function inferMediaLibrary(m) {
     if (!m || typeof m !== "object") return "asset";
@@ -56,6 +138,8 @@ function setTopbarInfo(text) {
 
 /** 与后端 project_assets.id 区分，避免与本地 Date.now() id 冲突 */
 const SERVER_ASSET_ID_BASE = 2_000_000_000;
+/** 与 ``data.db.FRAMEOS_SHARED_PROJECT_ID`` 一致；合并进各项目的公共产品图不可单条删除 */
+const FRAMEOS_SHARED_PROJECT_ID = "__frameos_shared__";
 
 function mergeServerAssetsIntoProject(project, rows) {
     if (!project || !Array.isArray(rows) || rows.length === 0) return;
@@ -64,53 +148,72 @@ function mergeServerAssetsIntoProject(project, rows) {
         project.media.filter((m) => m._serverAssetId != null).map((m) => Number(m._serverAssetId)),
     );
     for (const r of rows) {
-        const sid = Number(r.id);
-        if (!Number.isFinite(sid)) continue;
+        try {
+            if (!r || typeof r !== "object") continue;
+            const sid = Number(r.id);
+            if (!Number.isFinite(sid)) continue;
 
-        const lib =
-            r.library === "video" || r.library === "asset" || r.library === "storyboard"
-                ? r.library
-                : "asset";
-        const kind = String(r.kind || "").toLowerCase();
-        const type =
-            kind === "video"
-                ? "video"
-                : kind === "audio"
-                  ? "audio"
-                  : kind === "storyboard"
-                    ? "storyboard"
-                    : "image";
-        const meta = r.meta && typeof r.meta === "object" ? r.meta : {};
-        const uri = r.uri != null ? String(r.uri) : "";
+            const lib =
+                r.library === "video" || r.library === "asset" || r.library === "storyboard"
+                    ? r.library
+                    : "asset";
+            const kind = String(r.kind || "").toLowerCase();
+            const type =
+                kind === "video"
+                    ? "video"
+                    : kind === "audio"
+                      ? "audio"
+                      : kind === "storyboard"
+                        ? "storyboard"
+                        : "image";
+            const meta = r.meta && typeof r.meta === "object" ? r.meta : {};
+            const uri = r.uri != null ? String(r.uri) : "";
+            const rowPid =
+                r.project_id != null
+                    ? String(r.project_id)
+                    : r.projectId != null
+                      ? String(r.projectId)
+                      : "";
+            const catalogShared = rowPid === FRAMEOS_SHARED_PROJECT_ID;
 
-        if (seen.has(sid)) {
-            const hit = project.media.find((m) => Number(m._serverAssetId) === sid);
-            if (hit) {
-                hit.url = uri;
-                hit.name = r.name || hit.name || "未命名";
-                hit.library = lib;
-                hit.type = type;
-                hit.source = "server";
-                if (meta.size != null) hit.size = String(meta.size);
-                if (meta.dur != null) hit.dur = String(meta.dur);
-                if (meta.res != null) hit.res = String(meta.res);
+            if (seen.has(sid)) {
+                const hit = project.media.find((m) => Number(m._serverAssetId) === sid);
+                if (hit) {
+                    hit.url = uri;
+                    hit.name = r.name || hit.name || "未命名";
+                    hit.library = lib;
+                    hit.type = type;
+                    hit.source = "server";
+                    hit._serverProjectId = rowPid || undefined;
+                    hit._catalogShared = catalogShared;
+                    if (meta.size != null) hit.size = String(meta.size);
+                    if (meta.dur != null) hit.dur = String(meta.dur);
+                    if (meta.res != null) hit.res = String(meta.res);
+                    applyStoryboardServerMeta(hit, meta);
+                }
+                continue;
             }
-            continue;
-        }
 
-        project.media.push({
-            id: SERVER_ASSET_ID_BASE + sid,
-            _serverAssetId: sid,
-            name: r.name || "未命名",
-            type,
-            library: lib,
-            size: meta.size != null ? String(meta.size) : "—",
-            dur: meta.dur != null ? String(meta.dur) : undefined,
-            res: meta.res != null ? String(meta.res) : undefined,
-            url: uri,
-            source: "server",
-        });
-        seen.add(sid);
+            const item = {
+                id: SERVER_ASSET_ID_BASE + sid,
+                _serverAssetId: sid,
+                _serverProjectId: rowPid || undefined,
+                _catalogShared: catalogShared,
+                name: r.name || "未命名",
+                type,
+                library: lib,
+                size: meta.size != null ? String(meta.size) : "—",
+                dur: meta.dur != null ? String(meta.dur) : undefined,
+                res: meta.res != null ? String(meta.res) : undefined,
+                url: uri,
+                source: "server",
+            };
+            applyStoryboardServerMeta(item, meta);
+            project.media.push(item);
+            seen.add(sid);
+        } catch (e) {
+            console.warn("FrameOS: mergeServerAssetsIntoProject 跳过异常行", e);
+        }
     }
     migrateProjectMediaLibraries(project);
 }
@@ -164,37 +267,137 @@ function syncPreviewCursorFromProject() {
     lastPreviewMaxServerAssetId = maxServerAssetIdOnProject();
 }
 
-/** 用于聊天区缩略条：带 url 的素材按服务端 id / 本地 id 排序 */
-function sortedMediaForChatPreview(project) {
-    if (!project || !Array.isArray(project.media) || project.media.length === 0) return [];
-    const list = project.media.filter((m) => m && m.url);
-    list.sort((a, b) => {
-        const sa = Number(a._serverAssetId);
-        const sb = Number(b._serverAssetId);
-        if (Number.isFinite(sa) && Number.isFinite(sb) && sa !== sb) return sa - sb;
-        if (Number.isFinite(sa) && !Number.isFinite(sb)) return -1;
-        if (!Number.isFinite(sa) && Number.isFinite(sb)) return 1;
-        return (Number(a.id) || 0) - (Number(b.id) || 0);
+/** 1×1 透明 GIF：懒加载前占位，避免无 src 裂图 */
+const THUMB_BLANK_PIXEL = "data:image/gif;base64,R0lGODlhAQABAAAAACwAAAAAAQABAAA=";
+const THUMB_GRID_W = 320;
+const THUMB_GRID_H = 180;
+const _lazyIOByRoot = new WeakMap();
+
+function buildApiPath(path) {
+    const p = path.startsWith("/") ? path : `/${path}`;
+    const base = (CONFIG.API_BASE_URL || "").replace(/\/$/, "");
+    return base ? base + p : p;
+}
+
+function localMediaPathFromAbs(absUrl) {
+    const u = String(absUrl || "").trim();
+    if (!u) return "";
+    if (/^https?:\/\//i.test(u)) {
+        try {
+            return new URL(u).pathname.split("?")[0] || "";
+        } catch {
+            return "";
+        }
+    }
+    if (u.startsWith("/")) return u.split("?")[0];
+    return "";
+}
+
+/** 仅本地 /media/、/sample-assets/ 走缩略图 API；外链原样不经过此函数 */
+function frameosMediaThumbUrl(absUrl, kind, w, h) {
+    const path = localMediaPathFromAbs(absUrl);
+    if (!path || path.startsWith("/api/")) return "";
+    if (!path.startsWith("/media/") && !path.startsWith("/sample-assets/")) return "";
+    const q = new URLSearchParams({
+        src: path,
+        w: String(w),
+        h: String(h),
+        kind: kind === "video" ? "video" : "image",
     });
-    return list;
+    return buildApiPath(`/api/assets/thumbnail/?${q.toString()}`);
+}
+
+/** 拉取素材库原文件 URL：始终走 API 根（与缩略图一致），避免 8080 静态页直接请求 8000 /media/ 触发 CORS */
+function frameosMediaFileFetchUrl(storedUri) {
+    const abs = resolveAssetPreviewUrl(storedUri);
+    const path = localMediaPathFromAbs(abs);
+    if (!path || path.startsWith("/api/")) return "";
+    if (!path.startsWith("/media/") && !path.startsWith("/sample-assets/")) return "";
+    return buildApiPath(`/api/assets/file/?${new URLSearchParams({ src: path }).toString()}`);
+}
+
+/** 栅格图预览：WebP 走原图接口由浏览器解码（避免服务端 Pillow 未编 libwebp 时缩略图为空或灰块） */
+function frameosRasterPreviewUrl(absUrl, storedUri, w, h) {
+    const path = localMediaPathFromAbs(absUrl);
+    const leaf = (path.split("/").pop() || "").split("?")[0].toLowerCase();
+    if (leaf.endsWith(".webp")) {
+        const u = frameosMediaFileFetchUrl(storedUri);
+        if (u) return u;
+    }
+    return frameosMediaThumbUrl(absUrl, "image", w, h);
+}
+
+/** 缩略图 API 加载失败时回退到同源原图（含无扩展名但实际为 WebP 等情况） */
+function mediaThumbFailoverAttrs(thumbUrl, storedUri) {
+    const t = String(thumbUrl || "");
+    const fileApi = frameosMediaFileFetchUrl(storedUri);
+    if (!t || !fileApi || t === fileApi || !t.includes("/api/assets/thumbnail/")) return "";
+    return ` data-fallback="${escAttr(fileApi)}" onerror="this.onerror=null;var f=this.dataset.fallback;if(f)this.src=f"`;
+}
+
+/** 内部滚动容器内懒加载缩略图（原生 loading=lazy 相对整页视口，在 .media-grid 等内不准） */
+function hydrateLazyThumbnails(scrollRoot) {
+    if (!scrollRoot) return;
+    let io = _lazyIOByRoot.get(scrollRoot);
+    if (!io) {
+        io = new IntersectionObserver(
+            (entries) => {
+                for (const ent of entries) {
+                    if (!ent.isIntersecting) continue;
+                    const img = ent.target;
+                    if (!(img instanceof HTMLImageElement)) continue;
+                    const url = img.dataset.vwsSrc;
+                    if (!url) continue;
+                    img.src = url;
+                    img.removeAttribute("data-vws-src");
+                    try {
+                        img.fetchPriority = "low";
+                    } catch (_) {
+                        /* ignore */
+                    }
+                    io.unobserve(img);
+                }
+            },
+            { root: scrollRoot, rootMargin: "140px", threshold: 0 },
+        );
+        _lazyIOByRoot.set(scrollRoot, io);
+    }
+    scrollRoot.querySelectorAll("img[data-vws-src]").forEach((img) => io.observe(img));
 }
 
 /** @param {Array<{ url?: string, type?: string }>} items */
 function mediaItemsToChatPreviewParts(items) {
     const parts = [];
+    const tw = 200;
+    const th = 112;
     for (const m of items) {
         const abs = resolveAssetPreviewUrl(m.url);
         if (!abs) continue;
         const typ = m.type || "image";
         if (typ === "video") {
-            parts.push(
-                `<video class="chat-gen-preview-vid" src="${escAttr(abs)}" muted playsinline controls preload="metadata" referrerpolicy="no-referrer"></video>`,
-            );
+            const thumb = frameosMediaThumbUrl(abs, "video", tw, th);
+            if (thumb) {
+                parts.push(
+                    `<img class="chat-gen-preview-img" src="${escAttr(THUMB_BLANK_PIXEL)}" data-vws-src="${escAttr(thumb)}" alt="" width="${tw}" height="${th}" decoding="async" fetchpriority="low" referrerpolicy="no-referrer">`,
+                );
+            } else {
+                parts.push(
+                    `<video class="chat-gen-preview-vid" src="${escAttr(abs)}" muted playsinline controls preload="metadata" referrerpolicy="no-referrer"></video>`,
+                );
+            }
         } else if (typ === "image" || typ === "storyboard") {
             if (isLikelyRasterImageUrl(abs)) {
-                parts.push(
-                    `<img class="chat-gen-preview-img" src="${escAttr(abs)}" alt="" loading="lazy" referrerpolicy="no-referrer">`,
-                );
+                const thumb = frameosRasterPreviewUrl(abs, m.url, tw, th);
+                const fail = mediaThumbFailoverAttrs(thumb, m.url);
+                if (thumb) {
+                    parts.push(
+                        `<img class="chat-gen-preview-img" src="${escAttr(THUMB_BLANK_PIXEL)}" data-vws-src="${escAttr(thumb)}" alt="" width="${tw}" height="${th}" decoding="async" fetchpriority="low" referrerpolicy="no-referrer"${fail}>`,
+                    );
+                } else {
+                    parts.push(
+                        `<img class="chat-gen-preview-img" src="${escAttr(abs)}" alt="" loading="lazy" referrerpolicy="no-referrer">`,
+                    );
+                }
             }
         }
     }
@@ -209,6 +412,7 @@ function appendChatPreviewBubble(msgsEl, parts, metaKicker) {
     const kicker = escHtml(metaKicker);
     wrap.innerHTML = `<div class="msg-meta">${kicker} · ${time}</div><div class="msg-bubble msg-bubble--media-only"><div class="chat-gen-preview-row">${parts.join("")}</div></div>`;
     msgsEl.appendChild(wrap);
+    hydrateLazyThumbnails(msgsEl);
 }
 
 /** 本轮 Agent 成功后，在气泡下追加服务端新入库的图/视频缩略预览（不与历史消息一起持久化） */
@@ -639,6 +843,10 @@ async function selectProject(p) {
     if (title) title.textContent = p.name;
     currentMediaLibraryFilter = "all";
     document.querySelectorAll(".filter-tab").forEach((t, i) => t.classList.toggle("active", i === 0));
+    storyboardPipelinePicks = [];
+    renderStoryboardPickChips();
+    const sbFile = document.getElementById("sb-product-images");
+    if (sbFile) sbFile.value = "";
     refreshMediaGridView();
     updateContextChips();
 
@@ -697,6 +905,7 @@ async function selectProject(p) {
 
     if (!isCurrentProject()) return;
     renderChatForProject(p);
+    syncAgentModeToggleUi();
     syncPreviewCursorFromProject();
     if (shouldStartAssistantPollForProject(pid)) {
         startPendingAssistantPoll(pid);
@@ -711,6 +920,7 @@ function renderChatForProject(project) {
         box.innerHTML =
             '<div class="chat-empty-hint" style="padding:1.5rem 1rem;text-align:center;color:var(--muted);font-size:0.6875rem;letter-spacing:0.06em;">请从左侧选择项目，或点击「新建项目」开始对话</div>';
         updateStats();
+        syncAgentModeToggleUi();
         requestAnimationFrame(() => {
             syncChatToolbarVisibility();
         });
@@ -733,10 +943,7 @@ function renderChatForProject(project) {
             initialPresets: m.presets === true,
         });
     }
-    const previewParts = mediaItemsToChatPreviewParts(sortedMediaForChatPreview(project));
-    if (previewParts.length) {
-        appendChatPreviewBubble(box, previewParts, "素材预览");
-    }
+    /* 不在对话里自动插入「素材预览」条：新建/同步后公共图库等会铺满聊天区；成片仅在 Agent 回复后由 appendNewGenerationMediaPreviews 插入。 */
     if (pendingUserWhileTyping) {
         appendMessage(last.role, last.text, { noPersist: true });
         appendMessageRaw(`<div class="msg agent" id="${CHAT_TYPING_DOM_ID}">
@@ -813,27 +1020,41 @@ function renderProjects() {
 
 // ===== TABS =====
 function switchTab(tab) {
+    const panel = document.getElementById("panel-" + tab);
+    const tabBtn = document.getElementById("tab-" + tab);
+    if (!panel || !tabBtn) {
+        console.warn("FrameOS: switchTab 缺少 DOM（panel-" + tab + " 或 tab-" + tab + "）");
+        return;
+    }
     state.activeTab = tab;
     document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-    document.getElementById('panel-' + tab).classList.add('active');
-    document.getElementById('tab-' + tab).classList.add('active');
+    panel.classList.add('active');
+    tabBtn.classList.add('active');
     // Update nav items
     const navLabels = {
         agent: 'Agent 对话',
         project: '项目素材',
         reverse: '逆向提示词',
         douyin: '抖音视频',
+        storyboard: '分镜流水线',
         splice: '视频拼接',
     };
-    document.querySelectorAll('.nav-item').forEach(n => {
-        if (n.textContent.trim().startsWith(navLabels[tab].slice(0, 3))) n.classList.add('active');
-    });
+    const nl = navLabels[tab];
+    if (nl) {
+        const prefix = nl.slice(0, 3);
+        document.querySelectorAll('.nav-item').forEach(n => {
+            if (n.textContent.trim().startsWith(prefix)) n.classList.add('active');
+        });
+    }
     if (tab === "project" && state.activeProject) {
         void refreshServerAssetsForActiveProject();
     }
     if (tab === "douyin" && state.activeProject) {
+        void refreshServerAssetsForActiveProject();
+    }
+    if (tab === "storyboard" && state.activeProject) {
         void refreshServerAssetsForActiveProject();
     }
 }
@@ -856,7 +1077,11 @@ function resolveAssetPreviewUrl(raw) {
 }
 
 function isLikelyRasterImageUrl(u) {
-    const path = String(u).split("?")[0].toLowerCase();
+    const raw = String(u);
+    // 本地上传用 blob:；部分环境 WebP 等无扩展名信息，但素材项 type 已是 image
+    if (raw.startsWith("blob:")) return true;
+    if (/^data:image\//i.test(raw)) return true;
+    const path = raw.split("?")[0].toLowerCase();
     if (path.endsWith(".json") || path.endsWith(".txt")) return false;
     if (/\.(png|jpe?g|gif|webp|bmp|svg)$/.test(path)) return true;
     if (/^https?:\/\//i.test(u)) return true;
@@ -1046,11 +1271,29 @@ function mediaThumbInnerHtml(m) {
     const col = TYPE_COLORS[t] || "#333";
     const icon = TYPE_ICONS[t] || "📁";
     const abs = resolveAssetPreviewUrl(m.url);
+    /* 网格：小 JPEG 缩略图 API + 滚动容器内 IO；不用 <video> / 原图，避免 MP4 片段与大图拖慢列表。 */
     if (t === "video" && abs) {
-        return `<video class="media-thumb-video" src="${escAttr(abs)}" muted playsinline preload="metadata" referrerpolicy="no-referrer"></video>`;
+        const thumb = frameosMediaThumbUrl(abs, "video", THUMB_GRID_W, THUMB_GRID_H);
+        if (thumb) {
+            return (
+                `<img class="media-thumb-img" src="${escAttr(THUMB_BLANK_PIXEL)}" data-vws-src="${escAttr(thumb)}" alt="" ` +
+                `width="${THUMB_GRID_W}" height="${THUMB_GRID_H}" decoding="async" fetchpriority="low" referrerpolicy="no-referrer" ` +
+                `style="width:100%;height:100%;object-fit:cover">`
+            );
+        }
+        return `<div class="media-thumb-video-ph" title="在详情中播放"><span class="media-thumb-video-ph__play" aria-hidden="true">▶</span><span class="media-thumb-video-ph__label">VIDEO</span></div>`;
     }
     if ((t === "image" || t === "storyboard") && abs && isLikelyRasterImageUrl(abs)) {
-        return `<img class="media-thumb-img" src="${escAttr(abs)}" alt="" loading="lazy" referrerpolicy="no-referrer">`;
+        const thumb = frameosRasterPreviewUrl(abs, m.url, THUMB_GRID_W, THUMB_GRID_H);
+        const fail = mediaThumbFailoverAttrs(thumb, m.url);
+        if (thumb) {
+            return (
+                `<img class="media-thumb-img" src="${escAttr(THUMB_BLANK_PIXEL)}" data-vws-src="${escAttr(thumb)}" alt="" ` +
+                `width="${THUMB_GRID_W}" height="${THUMB_GRID_H}" decoding="async" fetchpriority="low" referrerpolicy="no-referrer" ` +
+                `style="width:100%;height:100%;object-fit:cover"${fail}>`
+            );
+        }
+        return `<img class="media-thumb-img" src="${escAttr(abs)}" alt="" loading="lazy" decoding="async" fetchpriority="low" referrerpolicy="no-referrer">`;
     }
     return `<div class="media-thumb-inner" style="background:${col}22;">
   <span style="font-size:1.5rem">${icon}</span>
@@ -1120,6 +1363,21 @@ function getActiveProjectMediaView() {
     return all.filter((m) => inferMediaLibrary(m) === currentMediaLibraryFilter);
 }
 
+/** 仅同步选中态，避免每次点击都 innerHTML 重绘整网（大图/多素材时极卡） */
+function syncMediaGridSelectionFromState() {
+    const grid = document.getElementById("media-grid");
+    if (!grid || !state.activeProject) return;
+    const sel = state.selectedMedia;
+    const selId = sel != null && sel.id != null ? Number(sel.id) : NaN;
+    grid.querySelectorAll(".media-card[data-media-id]").forEach((card) => {
+        const mid = Number(card.dataset.mediaId);
+        const on = Number.isFinite(selId) && mid === selId;
+        card.classList.toggle("selected", on);
+        const check = card.querySelector(":scope > .media-check:not(.media-check--toggle-bulk)");
+        if (check) check.textContent = on ? "✓" : "";
+    });
+}
+
 function refreshMediaGridView() {
     const grid = document.getElementById("media-grid");
     if (!state.activeProject) {
@@ -1136,9 +1394,11 @@ function refreshMediaGridView() {
 }
 
 function renderMediaGrid(media) {
-    const grid = document.getElementById('media-grid');
+    const grid = document.getElementById("media-grid");
+    if (!grid) return;
     if (!media || !media.length) {
-        grid.innerHTML = '<div style="grid-column:1/-1;padding:2rem;text-align:center;color:var(--muted);font-size:0.6875rem;">此项目暂无素材，点击「导入素材」添加</div>';
+        grid.innerHTML =
+            '<div style="grid-column:1/-1;padding:2rem;text-align:center;color:var(--muted);font-size:0.6875rem;">此项目暂无素材，点击「导入素材」添加</div>';
         return;
     }
     let html = `<div class="drop-zone" onclick="document.getElementById('file-upload').click()">
@@ -1148,7 +1408,7 @@ function renderMediaGrid(media) {
     media.forEach(m => {
         const isSelected = state.selectedMedia && state.selectedMedia.id === m.id;
         const t = m.type || 'image';
-        html += `<div class="media-card ${isSelected ? 'selected' : ''}" onclick="selectMedia(${m.id})" ondblclick="openMediaDetail(${m.id})">
+        html += `<div class="media-card ${isSelected ? 'selected' : ''}" data-media-id="${escAttr(String(m.id))}" onclick="selectMedia(${m.id})" ondblclick="openMediaDetail(${m.id})">
       <div class="media-thumb">
 ${mediaThumbInnerHtml(m)}
 ${mediaCardZoomBtnHtml(m)}
@@ -1164,19 +1424,20 @@ ${mediaCheckSlotHtml(m)}
     </div>`;
     });
     grid.innerHTML = html;
+    hydrateLazyThumbnails(grid);
 }
 
 function selectMedia(id) {
     const m = state.activeProject.media.find(x => x.id === id);
     state.selectedMedia = m;
-    refreshMediaGridView();
+    syncMediaGridSelectionFromState();
 }
 
 function openMediaDetail(id) {
     const m = state.activeProject.media.find(x => x.id === id);
     if (!m) return;
     state.selectedMedia = m;
-    refreshMediaGridView();
+    syncMediaGridSelectionFromState();
     const detail = document.getElementById('media-detail');
     detail.style.display = 'flex';
     document.getElementById('detail-filename').textContent = m.name;
@@ -1204,7 +1465,34 @@ function openMediaDetail(id) {
     ];
     if (m.dur) rows.push(['时长', m.dur]);
     if (m.res) rows.push(['分辨率', m.res]);
-    meta.innerHTML = rows.map(([k, v]) => `<div class="detail-row"><span class="detail-key">${k}</span><span class="detail-val">${v}</span></div>`).join('');
+    if (t === "storyboard" && m.shotCount != null && Number.isFinite(Number(m.shotCount))) {
+        rows.push(["镜头数", String(m.shotCount)]);
+    }
+    if (t === "storyboard" && m.runId) {
+        rows.push(["运行 ID", String(m.runId)]);
+    }
+    let storyboardLinks = "";
+    if (t === "storyboard") {
+        const ju = m.url ? resolveAssetPreviewUrl(m.url) : "";
+        const su = m.scriptUri ? resolveAssetPreviewUrl(m.scriptUri) : "";
+        const parts = [];
+        if (ju) {
+            parts.push(
+                `<a href="${escAttr(ju)}" target="_blank" rel="noopener">打开 JSON</a>`,
+            );
+        }
+        if (su) {
+            parts.push(
+                `<a href="${escAttr(su)}" target="_blank" rel="noopener">Markdown 脚本</a>`,
+            );
+        }
+        if (parts.length) {
+            storyboardLinks = `<div class="detail-row"><span class="detail-key">源文件</span><span class="detail-val" style="display:flex;gap:0.5rem;flex-wrap:wrap;">${parts.join("")}</span></div>`;
+        }
+    }
+    meta.innerHTML =
+        rows.map(([k, v]) => `<div class="detail-row"><span class="detail-key">${k}</span><span class="detail-val">${v}</span></div>`).join("") +
+        storyboardLinks;
 }
 
 function closeMediaDetail() {
@@ -1219,7 +1507,7 @@ function closeMediaDetail() {
 
 function filterMedia(libraryOrAll, btn) {
     document.querySelectorAll('.filter-tab').forEach(t => t.classList.remove('active'));
-    btn.classList.add('active');
+    if (btn) btn.classList.add('active');
     if (!state.activeProject) return;
     currentMediaLibraryFilter = libraryOrAll;
     refreshMediaGridView();
@@ -1232,11 +1520,25 @@ function sortMedia() {
     saveProjectsToStorage();
 }
 
+/** 部分系统对 .webp 等给出空 type 或 application/octet-stream，避免被当成「音频」进素材库 */
+function inferUploadMediaKind(file) {
+    const mime = (file.type || "").trim().toLowerCase();
+    if (mime.startsWith("video/")) return "video";
+    if (mime.startsWith("image/")) return "image";
+    if (mime.startsWith("audio/")) return "audio";
+    const base = String(file.name || "").split(/[\\/]/).pop() || "";
+    const n = base.split("?")[0].toLowerCase();
+    if (/\.(mp4|webm|mov|mkv|avi|m4v)$/.test(n)) return "video";
+    if (/\.(png|jpe?g|gif|webp|bmp|svg|heic|heif|tiff?)$/.test(n)) return "image";
+    if (/\.(mp3|wav|ogg|m4a|aac|flac)$/.test(n)) return "audio";
+    return "audio";
+}
+
 function handleFileUpload(e) {
     if (!state.activeProject) { alert('请先选择项目'); return; }
     const files = Array.from(e.target.files);
     files.forEach((f, i) => {
-        const type = f.type.startsWith('video') ? 'video' : f.type.startsWith('image') ? 'image' : 'audio';
+        const type = inferUploadMediaKind(f);
         const id = Date.now() + i;
         const library = type === 'video' ? 'video' : 'asset';
         const objectUrl = URL.createObjectURL(f);
@@ -1324,15 +1626,47 @@ function addAllVisibleVideosToTimeline() {
     refreshMediaGridView();
 }
 
-function deleteSelected() {
-    if (!state.selectedMedia || !state.activeProject) return;
+async function deleteSelected() {
+    if (!state.selectedMedia || !state.activeProject) {
+        showToast("请先选择一个素材");
+        return;
+    }
     const victim = state.selectedMedia;
+    if (victim._catalogShared) {
+        showToast("公共产品图库素材不可删除（由仓库「产品图/」同步）");
+        return;
+    }
+    const lib = inferMediaLibrary(victim);
+    const libLabel = MEDIA_LIB_LABEL[lib] || lib;
+    if (
+        !confirm(
+            `确定从「${libLabel}」移除「${victim.name || "未命名"}」？\n\n` +
+                (victim._serverAssetId != null
+                    ? "已同步服务器的条目将删除数据库记录及本项目 media 目录下对应文件，不可恢复。"
+                    : "本条仅在本机列表中，将从当前项目移除。"),
+        )
+    ) {
+        return;
+    }
+    const sid = victim._serverAssetId;
+    if (sid != null && Number.isFinite(Number(sid))) {
+        try {
+            await deleteProjectAssetRemote(String(state.activeProject.id), Number(sid));
+        } catch (e) {
+            showToast("服务端删除失败：" + (e && e.message ? e.message : String(e)));
+            return;
+        }
+    }
     if (victim._localObjectUrl && victim.url) {
         try {
             URL.revokeObjectURL(victim.url);
         } catch (_) { /* ignore */ }
     }
-    state.activeProject.media = state.activeProject.media.filter(m => m.id !== victim.id);
+    delete state.libraryBulkSelectedIds[String(victim.id)];
+    storyboardPipelinePicks = storyboardPipelinePicks.filter(
+        (p) => p.kind !== "library" || String(p.mediaId) !== String(victim.id),
+    );
+    state.activeProject.media = state.activeProject.media.filter((m) => m.id !== victim.id);
     state.timeline = state.timeline.filter((t) => t.id !== victim.id);
     if (state.timelineSelectedIndex >= state.timeline.length) {
         state.timelineSelectedIndex = Math.max(0, state.timeline.length - 1);
@@ -1341,10 +1675,12 @@ function deleteSelected() {
     state.selectedMedia = null;
     closeMediaDetail();
     refreshMediaGridView();
+    updateLibraryBulkToolbar();
     renderProjects();
     setTopbarInfo(state.activeProject.name + ' · ' + projectMediaCount(state.activeProject) + ' 个素材');
     updateContextChips();
     saveProjectsToStorage();
+    showToast("已删除素材");
 }
 
 function analyzeSelected() {
@@ -1854,6 +2190,7 @@ async function sendChatMessage() {
             text,
             projectName,
             projectId,
+            agent_mode: getAgentModeForProject(projectId),
         });
         appendMessageForProject(projectId, "agent", resp);
         updateStats();
@@ -2354,6 +2691,331 @@ function addGeneratedAssetToActiveProject(payload) {
     return item;
 }
 
+/** 分镜流水线可选：当前项目「素材库」中的栅格图片 */
+function getStoryboardEligibleProjectImages() {
+    const p = state.activeProject;
+    if (!p || !Array.isArray(p.media)) return [];
+    migrateProjectMediaLibraries(p);
+    const out = [];
+    for (const m of p.media) {
+        if (!m || m.type !== "image" || !m.url) continue;
+        if (inferMediaLibrary(m) !== "asset") continue;
+        const abs = resolveAssetPreviewUrl(m.url);
+        if (!abs || !isLikelyRasterImageUrl(abs)) continue;
+        const path = String(m.url).split("?")[0].toLowerCase();
+        if (path.endsWith(".svg")) continue;
+        out.push(m);
+    }
+    return out;
+}
+
+function storyboardLocalPickCount() {
+    return storyboardPipelinePicks.filter((p) => p.kind === "local").length;
+}
+
+function renderStoryboardPickChips() {
+    const el = document.getElementById("sb-image-picks");
+    if (!el) return;
+    if (!storyboardPipelinePicks.length) {
+        el.innerHTML = '<span class="storyboard-hint" style="margin:0;">尚未选择图片</span>';
+        return;
+    }
+    el.innerHTML = storyboardPipelinePicks
+        .map((p, i) => {
+            const label = p.kind === "local" ? p.file?.name || "本地上传" : p.name || "素材库";
+            const tag = p.kind === "local" ? "本地" : "库";
+            const short = label.length > 28 ? `${label.slice(0, 26)}…` : label;
+            return `<span class="sb-pick-chip" title="${escAttr(label)}"><span class="sb-pick-chip-k">${escHtml(tag)}</span><span class="sb-pick-chip-name">${escHtml(short)}</span><button type="button" class="sb-pick-chip-x" onclick="removeStoryboardPipelinePick(${i})" aria-label="移除">×</button></span>`;
+        })
+        .join("");
+}
+
+function removeStoryboardPipelinePick(index) {
+    if (index < 0 || index >= storyboardPipelinePicks.length) return;
+    storyboardPipelinePicks.splice(index, 1);
+    renderStoryboardPickChips();
+}
+
+function onStoryboardLocalFilesPicked(ev) {
+    const input = ev.target;
+    const fl = input?.files;
+    if (!fl || !fl.length) return;
+    let added = 0;
+    for (let i = 0; i < fl.length; i++) {
+        if (storyboardPipelinePicks.length >= 3) {
+            showToast("已达 3 张上限，请先移除再添加");
+            break;
+        }
+        storyboardPipelinePicks.push({ kind: "local", file: fl[i], name: fl[i].name });
+        added++;
+    }
+    input.value = "";
+    renderStoryboardPickChips();
+    if (added) showToast(`已添加 ${added} 张本地图`);
+}
+
+function renderStoryboardLibraryPickerGrid() {
+    const grid = document.getElementById("sb-pick-grid");
+    if (!grid) return;
+    const items = getStoryboardEligibleProjectImages();
+    if (!items.length) {
+        grid.innerHTML =
+            '<p class="storyboard-hint" style="grid-column:1/-1;margin:0;">当前项目素材库中没有可用的栅格图片，请先到「项目素材 → 素材库」导入或同步。</p>';
+        return;
+    }
+    grid.innerHTML = items
+        .map((m) => {
+            const abs = resolveAssetPreviewUrl(m.url);
+            const thumb = frameosRasterPreviewUrl(abs, m.url, 160, 160) || frameosMediaFileFetchUrl(m.url) || abs;
+            const fail = mediaThumbFailoverAttrs(thumb, m.url);
+            const on = storyboardPickerTempSelected.has(String(m.id));
+            return `<div class="sb-pick-card${on ? " is-on" : ""}" data-media-id="${escAttr(String(m.id))}" role="button" tabindex="0" title="${escAttr(m.name || "")}">
+  <img src="${escAttr(thumb)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" width="160" height="160"${fail}>
+  <span class="sb-pick-card-badge">${on ? "✓" : ""}</span>
+</div>`;
+        })
+        .join("");
+}
+
+function toggleStoryboardPickerCard(rawId) {
+    const k = String(rawId);
+    if (storyboardPickerTempSelected.has(k)) {
+        storyboardPickerTempSelected.delete(k);
+    } else {
+        const maxLib = 3 - storyboardLocalPickCount();
+        if (maxLib <= 0) {
+            showToast("本地上传已满 3 张，请先移除再选素材库");
+            return;
+        }
+        if (storyboardPickerTempSelected.size >= maxLib) {
+            showToast(`素材库还可选 ${maxLib} 张（与本地上传合计共 3 张）`);
+            return;
+        }
+        storyboardPickerTempSelected.add(k);
+    }
+    renderStoryboardLibraryPickerGrid();
+}
+
+function openStoryboardLibraryPicker() {
+    if (!state.activeProject) {
+        showToast("请先选择项目");
+        return;
+    }
+    storyboardPickerTempSelected = new Set(
+        storyboardPipelinePicks.filter((p) => p.kind === "library").map((p) => String(p.mediaId)),
+    );
+    renderStoryboardLibraryPickerGrid();
+    document.getElementById("sb-pick-overlay")?.classList.add("open");
+}
+
+function closeStoryboardLibraryPicker() {
+    document.getElementById("sb-pick-overlay")?.classList.remove("open");
+}
+
+function confirmStoryboardLibraryPicker() {
+    if (!state.activeProject) {
+        closeStoryboardLibraryPicker();
+        return;
+    }
+    const project = state.activeProject;
+    storyboardPipelinePicks = storyboardPipelinePicks.filter((p) => p.kind !== "library");
+    for (const k of storyboardPickerTempSelected) {
+        if (storyboardPipelinePicks.length >= 3) break;
+        const m = project.media.find((x) => String(x.id) === k);
+        if (!m || m.type !== "image" || !m.url) continue;
+        storyboardPipelinePicks.push({
+            kind: "library",
+            mediaId: m.id,
+            name: m.name || "素材",
+            relUrl: String(m.url),
+        });
+    }
+    renderStoryboardPickChips();
+    closeStoryboardLibraryPicker();
+}
+
+function appendSbLog(text, cls) {
+    const log = document.getElementById("sb-progress-log");
+    if (!log) return;
+    const div = document.createElement("div");
+    div.className = "sb-log-line" + (cls ? " " + cls : "");
+    div.textContent = text;
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+}
+
+function clearSbProgressUi() {
+    const log = document.getElementById("sb-progress-log");
+    if (log) log.innerHTML = "";
+    const box = document.getElementById("sb-result-box");
+    if (box) box.hidden = true;
+    const links = document.getElementById("sb-result-links");
+    if (links) links.innerHTML = "";
+    const st = document.getElementById("sb-form-status");
+    if (st) st.textContent = "";
+}
+
+function formatSbEvent(ev) {
+    if (!ev || typeof ev !== "object") return { text: "", cls: "" };
+    const t = ev.type;
+    if (t === "run_start") return { text: `任务开始 · run_id ${ev.run_id}`, cls: "sb-log-line--step" };
+    if (t === "step") return { text: `→ ${ev.label || ev.id || ""}`, cls: "sb-log-line--step" };
+    if (t === "step_done") {
+        const sid = ev.scene_id ? ` · 场景 ${ev.scene_id}` : "";
+        let extra = "";
+        if (ev.id === "analyze_product" && ev.packshot_image_index != null) {
+            extra = ` · 产品主图=第 ${ev.packshot_image_index} 张`;
+            if (ev.talent_reference_image_index != null) {
+                extra += `，人物参考=第 ${ev.talent_reference_image_index} 张（万相双参考：先人物后产品）`;
+            } else {
+                extra += "（万相单参考：仅产品）";
+            }
+        }
+        return { text: `✓ ${ev.id || "step"}${sid} ${ev.detail || ""}${extra}`.trim(), cls: "sb-log-line--done" };
+    }
+    if (t === "scene") {
+        return {
+            text: `━━ 场景 ${ev.index}/${ev.total}（${ev.scene_id}） ${ev.label || ""}`.trim(),
+            cls: "sb-log-line--scene",
+        };
+    }
+    if (t === "pipeline_done") return { text: `剧本与分镜 JSON 就绪：共 ${ev.shot_count} 镜`, cls: "sb-log-line--done" };
+    if (t === "wan_shot_done") return { text: `镜头 ${ev.index}/${ev.total} 出图完成 · ${ev.shot_id}`, cls: "" };
+    if (t === "artifact") return { text: `已写出 ${ev.kind || "文件"}：${ev.uri || ""}`, cls: "sb-log-line--done" };
+    if (t === "error") return { text: `错误：${ev.message || ""}`, cls: "sb-log-line--err" };
+    if (t === "done") return { text: `全部完成：${ev.shot_count} 镜（已写入当前项目分镜库）`, cls: "sb-log-line--done" };
+    return { text: JSON.stringify(ev).slice(0, 240), cls: "" };
+}
+
+function openStoryboardLibraryInProject() {
+    switchTab("project");
+    const tabs = document.querySelectorAll("#panel-project .filter-tab");
+    if (tabs.length >= 4) filterMedia("storyboard", tabs[3]);
+}
+
+function cancelStoryboardPipeline() {
+    if (storyboardStreamAbort) {
+        storyboardStreamAbort.abort();
+        storyboardStreamAbort = null;
+    }
+    const runBtn = document.getElementById("sb-run-btn");
+    const cbtn = document.getElementById("sb-cancel-btn");
+    if (runBtn) runBtn.disabled = false;
+    if (cbtn) cbtn.style.display = "none";
+    showToast("已取消");
+}
+
+async function submitStoryboardPipeline() {
+    if (!state.activeProject) {
+        showToast("请先选择项目");
+        return;
+    }
+    const pid = String(state.activeProject.id);
+    const desc = document.getElementById("sb-description")?.value?.trim() || "";
+    const hotword = document.getElementById("sb-hotword")?.value?.trim() || "";
+    if (!desc || !hotword) {
+        showToast("请填写视频需求与热点词");
+        return;
+    }
+    const n = storyboardPipelinePicks.length;
+    if (n < 1 || n > 3) {
+        showToast("请选择 1–3 张产品图（素材库与本地上传合计）");
+        return;
+    }
+    const files = [];
+    try {
+        for (const p of storyboardPipelinePicks) {
+            if (p.kind === "local") {
+                files.push(p.file);
+            } else {
+                const fetchUrl = frameosMediaFileFetchUrl(p.relUrl) || resolveAssetPreviewUrl(p.relUrl);
+                const r = await fetch(fetchUrl);
+                if (!r.ok) throw new Error(String(r.status));
+                const blob = await r.blob();
+                let fname = String(p.name || "library").replace(/[^\w.\u4e00-\u9fa5-]/g, "_").slice(0, 96);
+                if (!/\.(jpe?g|png|webp|gif)$/i.test(fname)) fname += ".jpg";
+                files.push(new File([blob], fname, { type: blob.type || "image/jpeg" }));
+            }
+        }
+    } catch {
+        showToast("无法读取某张素材库图片，请重试或改本地上传");
+        return;
+    }
+    const fd = new FormData();
+    fd.append("description", desc);
+    fd.append("hotword", hotword);
+    fd.append("style", document.getElementById("sb-style")?.value?.trim() || "写实");
+    fd.append("fps", String(document.getElementById("sb-fps")?.value || "24"));
+    fd.append("target_duration_sec", String(document.getElementById("sb-duration")?.value || "30"));
+    fd.append("generate_shot_images", document.getElementById("sb-gen-images")?.value || "true");
+    fd.append("write_prompt_preview", "true");
+    const wanRef = document.getElementById("sb-wan-ref-index")?.value;
+    if (wanRef !== undefined && wanRef !== null && String(wanRef).trim() !== "") {
+        fd.append("product_ref_index", String(wanRef).trim());
+    }
+    for (let i = 0; i < files.length; i++) {
+        fd.append("images", files[i]);
+    }
+
+    clearSbProgressUi();
+    const runBtn = document.getElementById("sb-run-btn");
+    const cbtn = document.getElementById("sb-cancel-btn");
+    if (runBtn) runBtn.disabled = true;
+    if (cbtn) cbtn.style.display = "";
+
+    storyboardStreamAbort?.abort();
+    storyboardStreamAbort = new AbortController();
+
+    const st = document.getElementById("sb-form-status");
+    if (st) st.textContent = "运行中…";
+
+    let streamHadErrorEvent = false;
+    streamStoryboardPipeline(pid, fd, (ev) => {
+        if (ev && ev.type === "error") streamHadErrorEvent = true;
+        const f = formatSbEvent(ev);
+        if (f.text) appendSbLog(f.text, f.cls);
+        if (ev && ev.type === "done") {
+            const box = document.getElementById("sb-result-box");
+            const links = document.getElementById("sb-result-links");
+            if (box && links) {
+                box.hidden = false;
+                const ju = ev.json_uri ? resolveAssetPreviewUrl(String(ev.json_uri)) : "";
+                const su = ev.script_uri ? resolveAssetPreviewUrl(String(ev.script_uri)) : "";
+                const parts = [];
+                if (ju) {
+                    parts.push(
+                        `<a href="${escAttr(ju)}" target="_blank" rel="noopener">分镜 JSON</a>`,
+                    );
+                }
+                if (su) {
+                    parts.push(
+                        `<a href="${escAttr(su)}" target="_blank" rel="noopener">Markdown 脚本</a>`,
+                    );
+                }
+                links.innerHTML = parts.join("") || "—";
+            }
+        }
+    }, storyboardStreamAbort.signal)
+        .then(async () => {
+            if (st) st.textContent = "";
+            if (runBtn) runBtn.disabled = false;
+            if (cbtn) cbtn.style.display = "none";
+            storyboardStreamAbort = null;
+            await refreshServerAssetsForActiveProject();
+            if (!streamHadErrorEvent) showToast("分镜已保存到当前项目");
+        })
+        .catch((e) => {
+            if (st) st.textContent = "";
+            if (runBtn) runBtn.disabled = false;
+            if (cbtn) cbtn.style.display = "none";
+            storyboardStreamAbort = null;
+            if (e && e.name === "AbortError") return;
+            const msg = e && e.message ? e.message : String(e);
+            appendSbLog("请求失败：" + msg, "sb-log-line--err");
+            showToast(msg.slice(0, 140));
+        });
+}
+
 // ===== SESSION TIMER =====
 function startSessionTimer() {
     setInterval(() => {
@@ -2378,6 +3040,14 @@ export function mountFrameOS() {
     document.getElementById("modal-overlay")?.addEventListener("click", function (e) {
         if (e.target === this) closeModal();
     });
+    document.getElementById("sb-pick-overlay")?.addEventListener("click", function (e) {
+        if (e.target === this) closeStoryboardLibraryPicker();
+    });
+    document.getElementById("sb-pick-grid")?.addEventListener("click", (e) => {
+        const card = e.target.closest(".sb-pick-card[data-media-id]");
+        if (!card) return;
+        toggleStoryboardPickerCard(card.dataset.mediaId);
+    });
     document.getElementById("local-data-overlay")?.addEventListener("click", function (e) {
         if (e.target === this) closeLocalDataPanel();
     });
@@ -2388,6 +3058,8 @@ export function mountFrameOS() {
     bindChatToolbarScrollReveal();
     syncChatToolbarVisibility();
     bindSplicePreviewVideoOnce();
+    renderStoryboardPickChips();
+    syncAgentModeToggleUi();
 
     Object.assign(window, {
         switchTab,
@@ -2427,6 +3099,14 @@ export function mountFrameOS() {
         copyText,
         analyzeVideo,
         submitDouyinFetch,
+        submitStoryboardPipeline,
+        cancelStoryboardPipeline,
+        openStoryboardLibraryPicker,
+        closeStoryboardLibraryPicker,
+        confirmStoryboardLibraryPicker,
+        onStoryboardLocalFilesPicked,
+        removeStoryboardPipelinePick,
+        openStoryboardLibraryInProject,
         switchJsonView,
         copyJson,
         openNewProjectModal,
@@ -2441,6 +3121,8 @@ export function mountFrameOS() {
         addGeneratedAssetToActiveProject,
         scrollChatToTop,
         deleteProjectAndData,
+        toggleAgentCreativeMode,
+        syncAgentModeToggleUi,
     });
 
     void init().catch((e) => console.warn("FrameOS: init failed", e));

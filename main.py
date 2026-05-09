@@ -1,11 +1,24 @@
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from typing import Any
-from pydantic import BaseModel, Field
 import asyncio
+import json
+import mimetypes
+import os
+import re
+import queue as sync_queue
+import shutil
+import tempfile
+import threading
+from typing import Any
+from urllib.parse import unquote
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+
 from agent_core import agent_loop, extract_last_assistant_text
 from agent_runtime.messages import strip_markdown_images
 from agent_runtime.reply_policy import apply_assistant_reply_policy
@@ -13,6 +26,7 @@ from agent_runtime.chat_augment import augment_message_for_model
 from runtime_ctx import agent_project_id_ctx
 from data.db import (
     DB_PATH,
+    FRAMEOS_SHARED_PROJECT_ID,
     init_db,
     load_history_for_model,
     list_chat_messages_for_api,
@@ -20,17 +34,28 @@ from data.db import (
     append_chat_assistant_message,
     append_chat_user_message,
     clear_session as db_clear_session,
+    delete_project_asset_owned,
     delete_project_data,
     list_project_assets,
 )
+from data.media_mirror import _safe_project_segment
+from data.product_catalog_sync import sync_product_catalog_from_repo
 from agent_runtime.douyin_service import douyin_fetch_and_persist
+from agent_runtime.media_thumbnail import get_or_create_thumbnail, normalize_src_to_file
+from agent_runtime.storyboard_run import run_storyboard_for_project
+
+load_dotenv(override=True)
+if os.getenv("ANTHROPIC_BASE_URL"):
+    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 
 app = FastAPI()
 
+# credentials=True 时浏览器不允许 Allow-Origin: *，8080 静态页 → 8000 API 会被拦。
+# 本 API 不依赖浏览器 Cookie，关闭 credentials 即可与 allow_origins=["*"] 并存。
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -39,20 +64,47 @@ _MEDIA_DIR = Path(__file__).resolve().parent / "data" / "media"
 _MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/media", StaticFiles(directory=str(_MEDIA_DIR)), name="media")
 
+_SAMPLE_ASSETS_DIR = Path(__file__).resolve().parent / "static" / "static" / "sample-assets"
+THUMB_ROUTE_ROOTS: list[tuple[str, Path]] = [("/media/", _MEDIA_DIR)]
+if _SAMPLE_ASSETS_DIR.is_dir():
+    app.mount(
+        "/sample-assets",
+        StaticFiles(directory=str(_SAMPLE_ASSETS_DIR)),
+        name="sample-assets",
+    )
+    THUMB_ROUTE_ROOTS.append(("/sample-assets/", _SAMPLE_ASSETS_DIR))
+
+# 前端静态页：请用 http://127.0.0.1:8000/app/ （根路径会重定向到此处）
+_UI_STATIC_ROOT = Path(__file__).resolve().parent / "static" / "static"
+
 
 @app.on_event("startup")
 def _startup() -> None:
     init_db()
+    n_cat = sync_product_catalog_from_repo()
     print(
         f"[FrameOS] 数据库: {DB_PATH.resolve()} | 生成素材(本地文件): {_MEDIA_DIR.resolve()}",
         flush=True,
     )
+    print(
+        f"[FrameOS] 公共产品图（产品图/）已同步至素材库: {n_cat} 条，所有项目可见",
+        flush=True,
+    )
+    if _UI_STATIC_ROOT.is_dir():
+        print(
+            "[FrameOS] 前端: http://127.0.0.1:8000/app/ （根路径 / 会重定向）",
+            flush=True,
+        )
 
 
 class ChatBody(BaseModel):
     message: str = Field(..., min_length=1)
     project: str | None = ""
     project_id: str = Field(..., min_length=1)
+    agent_mode: str = Field(
+        "normal",
+        description="normal | abstract：抽象模式追加互联网鬼才广告导演 persona。",
+    )
 
 class ChatResponse(BaseModel):
     reply: str
@@ -132,6 +184,9 @@ async def agent_chat(body: ChatBody) -> ChatResponse:
 
     token = agent_project_id_ctx.set(key)
     user_content = (body.message or "").strip()
+    mode = (body.agent_mode or "normal").strip().lower()
+    if mode not in ("normal", "abstract"):
+        mode = "normal"
 
     hist: list[dict[str, Any]] = load_history_for_model(key)
     user_for_model = augment_message_for_model(key, user_content)
@@ -139,7 +194,7 @@ async def agent_chat(body: ChatBody) -> ChatResponse:
     append_chat_user_message(key, user_content)
 
     try:
-        await asyncio.to_thread(agent_loop, hist)
+        await asyncio.to_thread(agent_loop, hist, mode)
     except Exception as e:
         status, for_db, detail = _agent_failure_http_detail(e)
         try:
@@ -191,7 +246,58 @@ async def clear_session(project_id: str) -> SessionClearedResponse:
 )
 def delete_project(project_id: str) -> SessionClearedResponse:
     """删除该 project_id 的聊天记录与 project_assets 行（与前端「删除项目」对齐）。"""
+    if project_id.strip() == FRAMEOS_SHARED_PROJECT_ID:
+        raise HTTPException(
+            status_code=403,
+            detail="公共产品图库不可删除（内部项目 __frameos_shared__）。",
+        )
     delete_project_data(project_id.strip())
+    return SessionClearedResponse(ok=True)
+
+
+def _unlink_owned_media_file(uri: str, project_id: str) -> None:
+    """若 ``uri`` 指向本项目 ``data/media/<segment>/`` 下单一文件则删除（防路径穿越）。"""
+    raw = (uri or "").strip()
+    if not raw.startswith("/media/"):
+        return
+    path = unquote(raw.split("?")[0])
+    parts = [p for p in path.split("/") if p]
+    if len(parts) < 3 or parts[0] != "media":
+        return
+    seg, *rest = parts[1], parts[2:]
+    if not rest:
+        return
+    if seg != _safe_project_segment(project_id):
+        return
+    rel = "/".join(rest).replace("\\", "/")
+    if not rel or ".." in rel.split("/"):
+        return
+    root = (_MEDIA_DIR / seg).resolve()
+    full = (root / rel).resolve()
+    try:
+        full.relative_to(root)
+    except ValueError:
+        return
+    if full.is_file():
+        full.unlink(missing_ok=True)
+
+
+@app.delete(
+    "/api/projects/{project_id}/assets/{asset_id}",
+    response_model=SessionClearedResponse,
+)
+def delete_project_asset(project_id: str, asset_id: int) -> SessionClearedResponse:
+    """删除当前项目名下一条素材（库内行 + 若为本项目目录下 ``/media/`` 文件则一并删磁盘）。"""
+    pid = project_id.strip()
+    if pid == FRAMEOS_SHARED_PROJECT_ID:
+        raise HTTPException(status_code=403, detail="不可通过此接口操作公共素材库项目。")
+    uri = delete_project_asset_owned(pid, asset_id)
+    if uri is None:
+        raise HTTPException(
+            status_code=404,
+            detail="素材不存在或不属于该项目（公共目录合并项请在仓库侧维护）。",
+        )
+    _unlink_owned_media_file(uri, pid)
     return SessionClearedResponse(ok=True)
 
 
@@ -211,6 +317,124 @@ def http_douyin_fetch(body: DouyinFetchBody) -> DouyinFetchResponse:
     return DouyinFetchResponse(ok=True, uri=str(out["uri"]))
 
 
+def _storyboard_upload_dest_name(original: str, index: int, ext: str) -> str:
+    """
+    临时落盘文件名保留上传时的可读信息（品类/项目名），供分镜 Step0 把「引用文件名」一并交给 Vision。
+    """
+    raw = (original or "").strip() or f"product_{index}"
+    stem = Path(Path(raw).name).stem
+    stem = re.sub(r"[^\w\-. \u4e00-\u9fff]", "_", stem).strip("._") or f"product_{index}"
+    stem = stem[:70]
+    return f"{index:02d}_{stem}{ext}"
+
+
+def _form_bool(raw: str | None, default: bool = True) -> bool:
+    s = (raw or "").strip().lower()
+    if s in ("0", "false", "no", "off", ""):
+        return False
+    if s in ("1", "true", "yes", "on"):
+        return True
+    return default
+
+
+@app.post("/api/projects/{project_id}/storyboard/stream")
+async def http_storyboard_pipeline_stream(
+    project_id: str,
+    description: str = Form(..., min_length=1),
+    hotword: str = Form(..., min_length=1),
+    images: list[UploadFile] = File(...),
+    fps: int = Form(24),
+    target_duration_sec: int = Form(30),
+    style: str = Form("写实"),
+    generate_shot_images: str = Form("true"),
+    write_prompt_preview: str = Form("true"),
+    product_ref_index: str | None = Form(
+        default=None,
+        description="可选，0-based：强制指定第几张上传图为万相参考；留空则由 Step0 识别产品主图",
+    ),
+):
+    """
+    multipart 上传 1–3 张产品图，SSE 推送流水线进度；结果写入当前项目目录并登记分镜库。
+    """
+    pid = project_id.strip()
+    if not pid:
+        raise HTTPException(400, detail="project_id 无效")
+    files = list(images)
+    if not (1 <= len(files) <= 3):
+        raise HTTPException(400, detail="请上传 1–3 张产品图")
+
+    tmp_root = Path(tempfile.mkdtemp(prefix="frameos_sb_"))
+    saved: list[Path] = []
+    try:
+        for i, uf in enumerate(files):
+            raw = await uf.read()
+            if not raw:
+                raise HTTPException(400, detail=f"第 {i + 1} 个文件为空")
+            name = (uf.filename or f"product_{i}.jpg").strip()
+            ext = Path(name).suffix.lower()
+            if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+                ext = ".jpg"
+            dest = tmp_root / _storyboard_upload_dest_name(name, i, ext)
+            dest.write_bytes(raw)
+            saved.append(dest)
+    except HTTPException:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+        raise
+
+    gen_img = _form_bool(generate_shot_images, True)
+    write_prev = _form_bool(write_prompt_preview, True)
+
+    pri_override: int | None = None
+    if product_ref_index is not None and str(product_ref_index).strip() != "":
+        try:
+            pri_override = int(str(product_ref_index).strip())
+        except ValueError:
+            pri_override = None
+
+    q: sync_queue.Queue[Any] = sync_queue.Queue()
+
+    def worker() -> None:
+        try:
+            run_storyboard_for_project(
+                pid,
+                saved,
+                description,
+                hotword,
+                fps=fps,
+                target_duration_sec=target_duration_sec,
+                style=style,
+                generate_shot_images=gen_img,
+                write_prompt_preview=write_prev,
+                product_ref_index=pri_override,
+                callback=q.put,
+            )
+        except Exception as e:
+            q.put({"type": "error", "message": str(e)[:2000]})
+        finally:
+            q.put(None)
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    async def event_gen():
+        while True:
+            item: Any = await asyncio.to_thread(q.get)
+            if item is None:
+                break
+            line = "data: " + json.dumps(item, ensure_ascii=False) + "\n\n"
+            yield line.encode("utf-8")
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.get("/api/projects/{project_id}/assets", response_model=list[ProjectAssetRow])
 def http_list_project_assets(project_id: str, library: str | None = None):
     rows = list_project_assets(project_id.strip(), library)
@@ -227,3 +451,64 @@ def http_list_project_assets(project_id: str, library: str | None = None):
         )
         for r in rows
     ]
+
+
+@app.get("/api/assets/thumbnail/")
+async def http_asset_thumbnail(
+    src: str = Query(..., min_length=1),
+    w: int = Query(360, ge=1, le=800),
+    h: int = Query(220, ge=1, le=800),
+    kind: str = Query("image"),
+) -> Response:
+    """
+    本地 ``/media/``、``/sample-assets/`` 文件的 JPEG 缩略图；磁盘缓存在 ``data/media/cache/thumbs/``。
+    """
+    k = (kind or "image").strip().lower()
+    if k not in ("image", "video"):
+        raise HTTPException(status_code=400, detail="kind must be image or video")
+    path = normalize_src_to_file(src, THUMB_ROUTE_ROOTS)
+    if path is None:
+        raise HTTPException(status_code=404, detail="source not found")
+    data = await asyncio.to_thread(get_or_create_thumbnail, _MEDIA_DIR, path, w, h, k)
+    return Response(
+        content=data,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
+@app.get("/api/assets/file/")
+def http_asset_file(src: str = Query(..., min_length=1)) -> FileResponse:
+    """
+    同源读取 ``/media/``、``/sample-assets/`` 原文件（供前端 fetch→Blob，避免静态页与挂载目录跨域）。
+    """
+    path = normalize_src_to_file(src, THUMB_ROUTE_ROOTS)
+    if path is None:
+        raise HTTPException(status_code=404, detail="source not found")
+    ctype, _ = mimetypes.guess_type(path.name)
+    return FileResponse(
+        path,
+        media_type=ctype or "application/octet-stream",
+        filename=path.name,
+        headers={"Cache-Control": "private, max-age=120"},
+    )
+
+
+@app.get("/", include_in_schema=False, response_model=None)
+def frameos_root() -> RedirectResponse | dict[str, str]:
+    """根路径无前端时返回提示；有 static/static 则进入 /app/ 单页。"""
+    if _UI_STATIC_ROOT.is_dir():
+        return RedirectResponse(url="/app/", status_code=307)
+    return {
+        "service": "frameos",
+        "docs": "/docs",
+        "hint": "前端未找到：请确认存在 static/static，或使用 /docs 调试 API。",
+    }
+
+
+if _UI_STATIC_ROOT.is_dir():
+    app.mount(
+        "/app",
+        StaticFiles(directory=str(_UI_STATIC_ROOT), html=True),
+        name="frameos_ui",
+    )

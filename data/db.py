@@ -7,6 +7,9 @@ import json
 
 DB_PATH = Path(__file__).resolve().parent / "app.db"
 
+# 公共产品图等素材使用此 project_id 存库；``list_project_assets(真实项目)`` 会自动并入这些行。
+FRAMEOS_SHARED_PROJECT_ID = "__frameos_shared__"
+
 def _connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -159,9 +162,33 @@ def clear_session(project_id: str) -> None:
 def delete_project_data(project_id: str) -> None:
     """删除该项目在库内的对话记录与素材元数据（不删磁盘上的 media 文件）。"""
     pid = project_id.strip()
+    if pid == FRAMEOS_SHARED_PROJECT_ID:
+        return
     with _connect() as conn:
         conn.execute("DELETE FROM project_assets WHERE project_id = ?", (pid,))
         conn.execute("DELETE FROM chat_messages WHERE project_id = ?", (pid,))
+
+
+def delete_project_asset_owned(project_id: str, asset_id: int) -> str | None:
+    """
+    删除属于 ``project_id`` 的一条 ``project_assets`` 记录（不匹配则不解删，如公共库条目挂在 __frameos_shared__）。
+    返回：删除成功时该行的 ``uri``（供调用方删磁盘文件）；未删则 ``None``。
+    """
+    pid = project_id.strip()
+    aid = int(asset_id)
+    if not pid:
+        return None
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT uri FROM project_assets WHERE id = ? AND project_id = ?",
+            (aid, pid),
+        ).fetchone()
+        if row is None:
+            return None
+        uri = str(row["uri"] or "")
+        conn.execute("DELETE FROM project_assets WHERE id = ? AND project_id = ?", (aid, pid))
+        conn.commit()
+        return uri
 
 
 def insert_project_asset(
@@ -187,39 +214,63 @@ def insert_project_asset(
         return int(cur.lastrowid)
 
 
-def list_project_assets(
-    project_id: str, library: str | None = None
-) -> list[dict[str, Any]]:
-    pid = project_id.strip()
-    with _connect() as conn:
-        if library:
-            rows = conn.execute(
+def _select_project_asset_rows(
+    conn: sqlite3.Connection, project_id: str, library: str | None
+) -> list[sqlite3.Row]:
+    if library:
+        return list(
+            conn.execute(
                 """
                 SELECT id, project_id, library, kind, name, uri, meta_json, created_at
                 FROM project_assets WHERE project_id = ? AND library = ?
                 ORDER BY id ASC
                 """,
-                (pid, library),
+                (project_id, library),
             ).fetchall()
-        else:
-            rows = conn.execute(
-                """
-                SELECT id, project_id, library, kind, name, uri, meta_json, created_at
-                FROM project_assets WHERE project_id = ?
-                ORDER BY id ASC
-                """,
-                (pid,),
-            ).fetchall()
+        )
+    return list(
+        conn.execute(
+            """
+            SELECT id, project_id, library, kind, name, uri, meta_json, created_at
+            FROM project_assets WHERE project_id = ?
+            ORDER BY id ASC
+            """,
+            (project_id,),
+        ).fetchall()
+    )
+
+
+def _rows_to_asset_dicts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for r in rows:
-        out.append({
-            "id": r["id"],
-            "project_id": r["project_id"],
-            "library": r["library"],
-            "kind": r["kind"],
-            "name": r["name"],
-            "uri": r["uri"],
-            "meta": json.loads(r["meta_json"] or "{}"),
-            "created_at": r["created_at"],
-        })
+        out.append(
+            {
+                "id": r["id"],
+                "project_id": r["project_id"],
+                "library": r["library"],
+                "kind": r["kind"],
+                "name": r["name"],
+                "uri": r["uri"],
+                "meta": json.loads(r["meta_json"] or "{}"),
+                "created_at": r["created_at"],
+            }
+        )
     return out
+
+
+def list_project_assets(
+    project_id: str, library: str | None = None
+) -> list[dict[str, Any]]:
+    """
+    列出项目素材。任意非共享项目会自动包含 ``FRAMEOS_SHARED_PROJECT_ID`` 下的公共素材（如仓库 ``产品图/`` 同步项），
+    且公共条目排在前面。
+    """
+    pid = project_id.strip()
+    with _connect() as conn:
+        if pid == FRAMEOS_SHARED_PROJECT_ID:
+            rows = _select_project_asset_rows(conn, pid, library)
+        else:
+            shared = _select_project_asset_rows(conn, FRAMEOS_SHARED_PROJECT_ID, library)
+            own = _select_project_asset_rows(conn, pid, library)
+            rows = list(shared) + list(own)
+    return _rows_to_asset_dicts(rows)

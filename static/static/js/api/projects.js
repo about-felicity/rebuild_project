@@ -1,5 +1,5 @@
 import { CONFIG } from "../config.js";
-import { apiGet, apiPost, apiRequest } from "./http.js";
+import { apiDelete, apiGet, apiPost, apiRequest } from "./http.js";
 
 /** GET /api/projects/:id/assets；失败时抛出，由调用方提示（不再静默返回 null 导致永远不合并素材） */
 export async function fetchProjectAssets(projectId, signal) {
@@ -38,4 +38,11 @@ export async function deleteProjectRemote(projectId) {
     if (CONFIG.USE_MOCK_API) return;
     const path = `/api/projects/${encodeURIComponent(projectId)}`;
     await apiRequest(path, { method: "DELETE" });
+}
+
+/** DELETE /api/projects/:projectId/assets/:assetId — 删除本项目名下一条已同步素材（含磁盘文件） */
+export async function deleteProjectAssetRemote(projectId, assetId) {
+    if (CONFIG.USE_MOCK_API) return;
+    const path = `/api/projects/${encodeURIComponent(projectId)}/assets/${encodeURIComponent(String(assetId))}`;
+    await apiDelete(path);
 }

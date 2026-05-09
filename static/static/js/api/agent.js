@@ -77,7 +77,7 @@ function mockAgentReply(text, projectName) {
 }
 
 /**
- * @param {{ text: string, projectName?: string, projectId: string }} payload
+ * @param {{ text: string, projectName?: string, projectId: string, agent_mode?: "normal"|"abstract" }} payload
  * @returns {Promise<string>} 助手纯文本
  */
 export async function requestAgentReply(payload) {
@@ -86,10 +86,12 @@ export async function requestAgentReply(payload) {
         await new Promise((r) => setTimeout(r, delay));
         return mockAgentReply(payload.text, payload.projectName || "");
     }
+    const mode = payload.agent_mode === "abstract" ? "abstract" : "normal";
     const data = await apiPost("/api/agent/chat", {
         message: payload.text,
         project: payload.projectName,
         project_id: payload.projectId,
+        agent_mode: mode,
     });
     if (typeof data === "string") return data;
     return data.reply ?? data.content ?? data.message ?? JSON.stringify(data);
