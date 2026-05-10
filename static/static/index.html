@@ -13,7 +13,7 @@
     </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FrameOS — 视频工作流</title>
-    <link rel="stylesheet" href="css/workflow.css?v=22">
+    <link rel="stylesheet" href="css/workflow.css?v=34">
 </head>
 
 <body>
@@ -73,6 +73,9 @@
                 <div class="tab-spacer"></div>
                 <span class="topbar-info" id="topbar-info">未选择项目</span>
             </div>
+
+            <!-- 各模块全屏叠在同一区域；避免多 panel 作 flex 兄弟时隐藏项仍参与高度计算导致可视区裁切 -->
+            <div class="main-panels">
 
             <!-- AGENT PANEL -->
             <section class="panel active" id="panel-agent">
@@ -192,6 +195,14 @@
                                 onclick="document.getElementById('file-upload').click()">+ 导入素材</button>
                             <input type="file" id="file-upload" multiple accept="video/*,image/*,audio/*"
                                 onchange="handleFileUpload(event)">
+                        </div>
+
+                        <!-- 导入条放在滚动区外，避免与首屏卡片同层叠放导致「上面卡片像被挡住」 -->
+                        <div id="media-import-host" class="media-import-host" hidden>
+                            <div class="drop-zone" onclick="document.getElementById('file-upload').click()">
+                                <div class="drop-zone-icon">↑</div>
+                                拖拽文件至此处，或点击导入素材
+                            </div>
                         </div>
 
                         <div class="media-grid" id="media-grid">
@@ -456,9 +467,29 @@
                                     <option value="false">仅 JSON + Markdown 脚本（更快）</option>
                                 </select>
                             </div>
-                            <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+                            <div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center;">
                                 <button type="button" class="analyze-btn" id="sb-run-btn" onclick="submitStoryboardPipeline()">开始生成分镜</button>
+                                <button type="button" class="analyze-btn" id="sb-one-stop-btn" onclick="submitStoryboardOneStopPipeline()" title="需开启「生成镜头图」；完成后自动接 Ark 图生视频与拼接">一键：分镜并成片</button>
                                 <button type="button" class="toolbar-btn" id="sb-cancel-btn" onclick="cancelStoryboardPipeline()" style="display:none;">取消</button>
+                            </div>
+                            <p class="storyboard-hint" style="margin-top:0.35rem;">「一键：分镜并成片」= 跑完分镜与出图后<strong>自动</strong>调用下方「从分镜生成成片视频」（需 ARK 视频、ffmpeg）。若只想改脚本不出视频，请用左侧「开始生成分镜」。</p>
+                            <div class="rev-field" style="margin-top:0.75rem;padding-top:0.75rem;border-top:1px solid color-mix(in oklab,var(--fg) 12%,transparent);">
+                                <label class="rev-label" for="sb-video-run-pick">选择本项目已有分镜（可直连成片）</label>
+                                <div style="display:flex;gap:0.4rem;flex-wrap:wrap;align-items:center;">
+                                    <select class="rev-select" id="sb-video-run-pick" style="flex:1;min-width:12rem;box-sizing:border-box;" onchange="onStoryboardRunPickChange(event)">
+                                        <option value="">— 选中项目后点「刷新列表」—</option>
+                                    </select>
+                                    <button type="button" class="toolbar-btn" onclick="refreshStoryboardRunPicker()">刷新列表</button>
+                                </div>
+                                <p class="storyboard-hint" style="margin-top:0.35rem;">从磁盘读取 <code>…/storyboard_runs/&lt;run_id&gt;/</code>（含 <code>storyboard_script.md</code> 的条目会标注）。选中后自动填入下方 run id，再点生成成片；无需再走「一句话生成分镜」。</p>
+                                <label class="rev-label" for="sb-video-run-id" style="margin-top:0.65rem;">分镜 run id（成片用 · 可手改）</label>
+                                <input type="text" class="modal-input" id="sb-video-run-id" style="width:100%;box-sizing:border-box;font-family:var(--font-mono,monospace);font-size:0.8125rem;"
+                                    placeholder="下拉选择或粘贴目录名；完成「生成分镜」后也会自动填入">
+                                <p class="storyboard-hint" style="margin-top:0.35rem;">当 <code>storyboard.json</code> 与每镜 <code>frame.image_url</code> 已就绪时，逐镜 Ark 图生视频并用 ffmpeg 拼接，成片写入<strong>视频库</strong>（需本机 <code>ffmpeg</code> 与 ARK 视频配置）。生成成片时<strong>优先使用上方下拉所选</strong>。</p>
+                                <div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-top:0.5rem;">
+                                    <button type="button" class="analyze-btn" id="sb-video-run-btn" onclick="submitStoryboardVideoPipeline()">从分镜生成成片视频</button>
+                                    <button type="button" class="toolbar-btn" id="sb-video-cancel-btn" onclick="cancelStoryboardVideoPipeline()" style="display:none;">取消成片</button>
+                                </div>
                             </div>
                             <p class="storyboard-hint" id="sb-form-status" aria-live="polite"></p>
                         </div>
@@ -474,6 +505,10 @@
                         <div class="storyboard-result" id="sb-result-box" hidden>
                             <div class="section-label" style="font-size:0.5rem;margin-bottom:0.35rem;color:var(--muted);letter-spacing:0.12em;text-transform:uppercase;">本轮产出链接</div>
                             <div class="storyboard-result-links" id="sb-result-links"></div>
+                            <div class="section-label sb-result-frames-label" id="sb-result-frames-label" hidden style="font-size:0.5rem;margin:0.85rem 0 0.35rem;color:var(--muted);letter-spacing:0.12em;text-transform:uppercase;">分镜图（按镜序）</div>
+                            <div class="storyboard-result-frames" id="sb-result-frames" role="list"></div>
+                            <div class="section-label sb-result-final-video-label" id="sb-result-final-video-label" hidden style="font-size:0.5rem;margin:0.85rem 0 0.35rem;color:var(--muted);letter-spacing:0.12em;text-transform:uppercase;">成片预览（已入视频库）</div>
+                            <div class="sb-result-final-video-wrap" id="sb-result-final-video-wrap" hidden></div>
                         </div>
                     </div>
                 </div>
@@ -619,6 +654,8 @@
                 </div>
             </section>
 
+            </div>
+
         </main>
     </div>
 
@@ -708,7 +745,7 @@
         </figure>
     </div>
 
-    <script type="module" src="js/main.js?v=22"></script>
+    <script type="module" src="js/main.js?v=30"></script>
 </body>
 
 </html>

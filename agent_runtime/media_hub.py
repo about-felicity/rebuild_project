@@ -8,6 +8,9 @@
 **输出**：单例 ``LocalWanArkHub``；若尚未创建则现场构造。
 
 环境变量（节选）：
+- ``IMAGE_GENERATION_PROVIDER``：``seedream``（默认，火山 Ark 图生）或 ``wan``（DashScope 万相）。
+- ``ARK_IMAGE_MODEL``：Seedream 模型 ID，默认 ``doubao-seedream-5-0-260128``。
+- ``STORYBOARD_STRICT_PRODUCT_REF``：默认开启，分镜逐镜出图提示词强制锁产品参考图；``0`` 关闭。
 - ``MEDIA_ROOT``：可选，首帧本地路径解析用，与 ``tool/ai`` 一致。
 """
 

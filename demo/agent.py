@@ -103,7 +103,7 @@ TOOLS: list[dict[str, Any]] = [
                 },
                 "wan_model": {
                     "type": "string",
-                    "description": "万相模型，默认 wan2.7-image（更快）；可改 wan2.7-image-pro",
+                    "description": "万相模型，默认 wan2.7-image-pro；可改 wan2.7-image",
                 },
                 "wan_size": {
                     "type": "string",
@@ -204,7 +204,7 @@ def tool_run_storyboard_pipeline(inp: dict[str, Any]) -> str:
             char_descs=char_descs,
             fill_prompts=fill_prompts,
             generate_shot_images=gen_img,
-            wan_model=str(inp.get("wan_model") or "wan2.7-image"),
+            wan_model=str(inp.get("wan_model") or "wan2.7-image-pro"),
             wan_size=str(inp.get("wan_size") or "2K"),
             product_ref_index=wan_ref_override,
             frames_subdir=str(inp.get("shot_images_dir") or "storyboard_frames"),

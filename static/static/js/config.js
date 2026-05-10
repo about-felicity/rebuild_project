@@ -1,7 +1,8 @@
 /**
  * 环境配置：联调时改这里即可，勿在业务组件里写死域名。
  *
- * - 推荐：只开 uvicorn，打开 http://127.0.0.1:8000/app/（与 API 同域，无 CORS）。
+ * - 推荐：只开 uvicorn，打开 http://主机:8000/app/（与 API 同域，无 CORS）。
+ *   本机用 127.0.0.1；局域网用手机/其它电脑时用你电脑的 IPv4（需 serve-lan.bat）。
  * - 若用 python -m http.server 8080 打开静态页，会自动回退请求 http://127.0.0.1:8000。
  */
 function resolveApiBaseUrl() {

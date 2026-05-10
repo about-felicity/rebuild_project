@@ -9,6 +9,7 @@ import queue as sync_queue
 import shutil
 import tempfile
 import threading
+import uuid
 from typing import Any
 from urllib.parse import unquote
 
@@ -28,6 +29,7 @@ from data.db import (
     DB_PATH,
     FRAMEOS_SHARED_PROJECT_ID,
     init_db,
+    insert_project_asset,
     load_history_for_model,
     list_chat_messages_for_api,
     list_chat_project_ids_recent_first,
@@ -38,11 +40,12 @@ from data.db import (
     delete_project_data,
     list_project_assets,
 )
-from data.media_mirror import _safe_project_segment
+from data.media_mirror import _CT_EXT, _safe_project_segment, ensure_project_media_dir
 from data.product_catalog_sync import sync_product_catalog_from_repo
 from agent_runtime.douyin_service import douyin_fetch_and_persist
 from agent_runtime.media_thumbnail import get_or_create_thumbnail, normalize_src_to_file
 from agent_runtime.storyboard_run import run_storyboard_for_project
+from agent_runtime.storyboard_video_run import run_storyboard_video_for_project
 
 load_dotenv(override=True)
 if os.getenv("ANTHROPIC_BASE_URL"):
@@ -432,6 +435,218 @@ async def http_storyboard_pipeline_stream(
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+_RUN_ID_DIR_RE = re.compile(r"^[a-fA-F0-9]{12,32}$")
+
+
+def _list_storyboard_runs_disk(project_id: str) -> list[dict[str, Any]]:
+    """扫描 ``data/media/<seg>/storyboard_runs/<run_id>/``，供前端下拉选择后直连成片。"""
+    seg, proj_dir = ensure_project_media_dir(project_id.strip())
+    runs_root = proj_dir / "storyboard_runs"
+    out: list[dict[str, Any]] = []
+    if not runs_root.is_dir():
+        return out
+    for child in runs_root.iterdir():
+        if not child.is_dir():
+            continue
+        run_id = child.name
+        if not _RUN_ID_DIR_RE.match(run_id):
+            continue
+        jp = child / "storyboard.json"
+        script_md = child / "storyboard_script.md"
+        script_prompts = child / "storyboard_script_prompts.md"
+        has_script_md = script_md.is_file()
+        if has_script_md:
+            script_uri = f"/media/{seg}/storyboard_runs/{run_id}/storyboard_script.md"
+        elif script_prompts.is_file():
+            script_uri = f"/media/{seg}/storyboard_runs/{run_id}/storyboard_script_prompts.md"
+        else:
+            script_uri = None
+        json_uri = f"/media/{seg}/storyboard_runs/{run_id}/storyboard.json" if jp.is_file() else None
+
+        shot_count: int | None = None
+        shots_with_image: int | None = None
+        mtime = 0.0
+        if jp.is_file():
+            try:
+                mtime = jp.stat().st_mtime
+                data = json.loads(jp.read_text(encoding="utf-8"))
+                shots = data.get("shots")
+                if isinstance(shots, list):
+                    shot_count = len(shots)
+                    shots_with_image = sum(
+                        1
+                        for s in shots
+                        if isinstance(s, dict)
+                        and str((s.get("frame") or {}).get("image_url") or "").strip()
+                    )
+            except Exception:
+                mtime = jp.stat().st_mtime if jp.is_file() else child.stat().st_mtime
+        else:
+            mtime = child.stat().st_mtime
+
+        ready = bool(
+            jp.is_file()
+            and shot_count is not None
+            and shot_count > 0
+            and shots_with_image == shot_count
+        )
+        label_parts = [f"{run_id[:8]}…"]
+        if has_script_md:
+            label_parts.append("storyboard_script.md")
+        if shot_count is not None:
+            label_parts.append(f"{shots_with_image or 0}/{shot_count} 镜有图")
+        out.append(
+            {
+                "run_id": run_id,
+                "label": " · ".join(label_parts),
+                "has_json": jp.is_file(),
+                "has_script_md": has_script_md,
+                "json_uri": json_uri,
+                "script_uri": script_uri,
+                "shot_count": shot_count,
+                "shots_with_image": shots_with_image,
+                "ready_for_video": ready,
+                "updated_at": int(mtime),
+            }
+        )
+    out.sort(key=lambda x: -int(x.get("updated_at") or 0))
+    return out
+
+
+@app.get("/api/projects/{project_id}/storyboard/runs")
+def http_list_storyboard_runs(project_id: str) -> list[dict[str, Any]]:
+    """列出本项目磁盘上的分镜 run（含是否已有 script / 是否可成片）。"""
+    pid = project_id.strip()
+    if not pid:
+        raise HTTPException(400, detail="project_id 无效")
+    return _list_storyboard_runs_disk(pid)
+
+
+@app.post("/api/projects/{project_id}/storyboard/video/stream")
+async def http_storyboard_video_pipeline_stream(
+    project_id: str,
+    run_id: str = Form(..., min_length=12, max_length=32),
+):
+    """
+    分镜成片：读取已写入的 ``storyboard_runs/<run_id>/storyboard.json``，
+    逐镜 Ark 图生视频、ffmpeg 拼接、登记视频库；SSE 推送进度。
+    """
+    pid = project_id.strip()
+    if not pid:
+        raise HTTPException(400, detail="project_id 无效")
+
+    q: sync_queue.Queue[Any] = sync_queue.Queue()
+
+    def worker() -> None:
+        try:
+            run_storyboard_video_for_project(
+                pid,
+                run_id.strip(),
+                callback=q.put,
+            )
+        except Exception as e:
+            q.put({"type": "error", "message": str(e)[:2000]})
+        finally:
+            q.put(None)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    async def event_gen():
+        while True:
+            item: Any = await asyncio.to_thread(q.get)
+            if item is None:
+                break
+            line = "data: " + json.dumps(item, ensure_ascii=False) + "\n\n"
+            yield line.encode("utf-8")
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+_UPLOAD_VIDEO_EXT = frozenset({".mp4", ".webm", ".mov", ".mkv", ".m4v", ".avi"})
+_UPLOAD_IMAGE_EXT = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg"})
+_UPLOAD_AUDIO_EXT = frozenset({".mp3", ".wav", ".ogg", ".m4a", ".aac", ".flac"})
+
+
+def _classify_upload(filename: str, content_type: str | None) -> tuple[str, str, str]:
+    """返回 (library, kind, 磁盘扩展名)。"""
+    ct = (content_type or "").split(";")[0].strip().lower()
+    suf = Path(filename).suffix.lower()
+    if ct.startswith("video/"):
+        ext = suf if suf in _UPLOAD_VIDEO_EXT else _CT_EXT.get(ct, ".mp4")
+        return "video", "video", ext
+    if ct.startswith("image/"):
+        ext = suf if suf in _UPLOAD_IMAGE_EXT else _CT_EXT.get(ct, ".png")
+        return "asset", "image", ext
+    if ct.startswith("audio/"):
+        ext = suf if suf in _UPLOAD_AUDIO_EXT else _CT_EXT.get(ct, ".mp3")
+        return "asset", "audio", ext
+    if suf in _UPLOAD_VIDEO_EXT:
+        return "video", "video", suf
+    if suf in _UPLOAD_IMAGE_EXT:
+        return "asset", "image", suf
+    if suf in _UPLOAD_AUDIO_EXT:
+        return "asset", "audio", suf
+    return "asset", "image", ".bin"
+
+
+@app.post("/api/projects/{project_id}/assets", response_model=ProjectAssetRow)
+async def http_upload_project_asset(
+    project_id: str,
+    file: UploadFile = File(...),
+) -> ProjectAssetRow:
+    """
+    浏览器上传素材：落盘到 ``data/media/<project>/``，登记 ``project_assets``，
+    返回 ``uri`` 为 ``/media/...``（刷新后仍可用）。
+    """
+    pid = project_id.strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="project_id 无效")
+    if pid == FRAMEOS_SHARED_PROJECT_ID:
+        raise HTTPException(status_code=403, detail="不可向公共素材库项目上传")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="文件为空")
+    orig = (file.filename or "upload").strip() or "upload"
+    safe_name = Path(orig).name
+    if len(safe_name) > 180:
+        safe_name = safe_name[:180]
+
+    lib, kind, ext = _classify_upload(safe_name, file.content_type)
+    if ext == ".bin" and kind == "image":
+        ext = ".png"
+
+    seg, proj_dir = ensure_project_media_dir(pid)
+    disk_name = f"{uuid.uuid4().hex}{ext}"
+    dest = proj_dir / disk_name
+    dest.write_bytes(raw)
+    uri = f"/media/{seg}/{disk_name}"
+
+    meta: dict[str, Any] = {"size": len(raw)}
+    ct0 = (file.content_type or "").split(";")[0].strip()
+    if ct0:
+        meta["content_type"] = ct0
+
+    aid = insert_project_asset(pid, lib, kind, safe_name, uri, meta=meta)
+    return ProjectAssetRow(
+        id=aid,
+        project_id=pid,
+        library=lib,
+        kind=kind,
+        name=safe_name,
+        uri=uri,
+        meta=meta,
+        created_at=None,
     )
 
 

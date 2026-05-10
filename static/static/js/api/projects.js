@@ -9,6 +9,14 @@ export async function fetchProjectAssets(projectId, signal) {
     return Array.isArray(data) ? data : [];
 }
 
+/** GET /api/projects/:id/storyboard/runs — 本项目 storyboard_runs 目录列表（成片下拉） */
+export async function fetchStoryboardRuns(projectId, signal) {
+    if (CONFIG.USE_MOCK_API) return [];
+    const path = `/api/projects/${encodeURIComponent(projectId)}/storyboard/runs`;
+    const data = await apiGet(path, signal ? { signal } : {});
+    return Array.isArray(data) ? data : [];
+}
+
 /** 后端就绪后：GET /api/projects */
 export async function fetchProjects() {
     if (CONFIG.USE_MOCK_API) return null;
@@ -29,7 +37,27 @@ export async function uploadAssetRemote(projectId, file) {
     const path = `/api/projects/${encodeURIComponent(projectId)}/assets`;
     const base = CONFIG.API_BASE_URL.replace(/\/$/, "");
     const res = await fetch(base + path, { method: "POST", body: fd });
-    if (!res.ok) throw new Error("upload failed");
+    if (!res.ok) {
+        let detail = res.statusText || "upload failed";
+        try {
+            const t = await res.text();
+            if (t) {
+                try {
+                    const j = JSON.parse(t);
+                    if (j && j.detail != null) {
+                        detail = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+                    } else {
+                        detail = t.slice(0, 200);
+                    }
+                } catch {
+                    detail = t.slice(0, 200);
+                }
+            }
+        } catch {
+            /* ignore */
+        }
+        throw new Error(detail);
+    }
     return res.json();
 }
 

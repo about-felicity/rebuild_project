@@ -224,6 +224,28 @@ def extract_wan_image_urls_from_response(raw: Any) -> list[str]:
     return list(dict.fromkeys(extracted))
 
 
+def clamp_ark_video_duration_seconds(duration: int, model_id: str) -> int:
+    """
+    火山方舟 CreateContentsGenerationsTasks 对 ``duration`` 强校验（整数秒）。
+    文档摘要：1.0 系列 [2,12]；1.5 pro [4,12] 或 -1；2.0 系列 [4,15] 或 -1。
+    本函数不返回 -1，仅钳位到各模型允许的闭区间。
+    """
+    try:
+        d = int(round(float(duration)))
+    except (TypeError, ValueError):
+        d = 5
+    mid = (model_id or "").lower()
+    if "seedance-2" in mid:
+        return max(4, min(15, d))
+    if "seedance-1-5" in mid:
+        return max(4, min(12, d))
+    if "seedance-1-0" in mid:
+        return max(2, min(12, d))
+    if "seedance" in mid:
+        return max(4, min(12, d))
+    return max(2, min(12, d))
+
+
 class MediaGenerationRequestClient:
     """
     两类调用（模型 / 密钥均来自构造时传入的 Params）：
@@ -267,7 +289,7 @@ class MediaGenerationRequestClient:
                 ).strip(),
                 model_id=os.getenv(
                     "ARK_VIDEO_MODEL",
-                    "doubao-seedance-1-0-pro-fast-251015",
+                    "doubao-seedance-1-5-pro-251215",
                 ).strip(),
                 resolution=os.getenv("ARK_VIDEO_RESOLUTION", "").strip(),
                 ratio_default=os.getenv("ARK_VIDEO_RATIO", "adaptive").strip(),
@@ -356,11 +378,13 @@ class MediaGenerationRequestClient:
             {"type": "text", "text": prompt},
             {"type": "image_url", "image_url": {"url": src}},
         ]
+        dur_req = int(duration or 5)
+        dur_use = clamp_ark_video_duration_seconds(dur_req, mid)
         create_kwargs: dict[str, Any] = {
             "model": mid,
             "content": content,
             "ratio": request_ratio,
-            "duration": int(duration or 5),
+            "duration": dur_use,
             "watermark": request_watermark,
         }
         if any(token in mid for token in ("seedance-1-5", "seedance-2-0")):
@@ -404,6 +428,7 @@ class MediaGenerationRequestClient:
 
 __all__ = [
     "ArkVideoApiParams",
+    "clamp_ark_video_duration_seconds",
     "DashScopeWanApiParams",
     "MediaGenerationRequestClient",
     "extract_wan_image_urls_from_response",

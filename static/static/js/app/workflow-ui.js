@@ -6,10 +6,16 @@ import {
     fetchChatProjectIds,
     requestAgentReply,
 } from "../api/agent.js";
-import { deleteProjectAssetRemote, deleteProjectRemote, fetchProjectAssets } from "../api/projects.js";
+import {
+    deleteProjectAssetRemote,
+    deleteProjectRemote,
+    fetchProjectAssets,
+    fetchStoryboardRuns,
+    uploadAssetRemote,
+} from "../api/projects.js";
 import { requestStoryboardJson } from "../api/analysis.js";
 import { requestDouyinFetch } from "../api/douyin.js";
-import { streamStoryboardPipeline } from "../api/storyboard.js";
+import { streamStoryboardPipeline, streamStoryboardVideoPipeline } from "../api/storyboard.js";
 import { requestExportVideo } from "../api/splice.js";
 import { escHtml, escAttr, formatSize, parseDur, formatDuration } from "../utils/helpers.js";
 
@@ -90,6 +96,10 @@ function toggleAgentCreativeMode() {
 }
 
 let storyboardStreamAbort = null;
+let storyboardVideoStreamAbort = null;
+/** 为 true 时：分镜 SSE 成功后自动调用成片（一键流程） */
+let storyboardChainVideoAfter = false;
+let lastStoryboardRunId = null;
 
 /** 分镜流水线产品图：素材库 + 本地上传，合计 1–3 张 */
 let storyboardPipelinePicks = [];
@@ -119,6 +129,12 @@ function inferMediaLibrary(m) {
 function migrateProjectMediaLibraries(project) {
     if (!project) return;
     if (!Array.isArray(project.media)) project.media = [];
+    project.media = project.media.filter((m) => {
+        if (m && m._blobPending && (!m.url || String(m.url).startsWith("blob:"))) {
+            return false;
+        }
+        return true;
+    });
     for (const m of project.media) {
         m.library = inferMediaLibrary(m);
     }
@@ -487,9 +503,30 @@ function loadProjectsFromStorage() {
     }
 }
 
+/** blob: 无法跨刷新恢复，写入 localStorage 会致裂图；未完成上传的条目只记 _blobPending，刷新后丢弃并由服务端列表补全 */
+function sanitizeMediaItemForStorage(m) {
+    if (!m || typeof m !== "object") return m;
+    const { _localObjectUrl, _uploadPending, ...rest } = m;
+    const u = rest.url != null ? String(rest.url) : "";
+    if (u.startsWith("blob:")) {
+        delete rest.url;
+        return { ...rest, _blobPending: true };
+    }
+    return rest;
+}
+
+function sanitizeProjectForStorage(p) {
+    if (!p || typeof p !== "object") return p;
+    return {
+        ...p,
+        media: Array.isArray(p.media) ? p.media.map(sanitizeMediaItemForStorage) : [],
+    };
+}
+
 function saveProjectsToStorage() {
     try {
-        localStorage.setItem(LS_PROJECTS, JSON.stringify(state.projects));
+        const payload = state.projects.map(sanitizeProjectForStorage);
+        localStorage.setItem(LS_PROJECTS, JSON.stringify(payload));
     } catch (e) {
         console.warn("FrameOS: save projects failed", e);
     }
@@ -910,6 +947,9 @@ async function selectProject(p) {
     if (shouldStartAssistantPollForProject(pid)) {
         startPendingAssistantPoll(pid);
     }
+    if (state.activeTab === "storyboard") {
+        void refreshStoryboardRunPicker();
+    }
 }
 
 /** 切换项目时重绘聊天区：每个项目独立一条消息列表 */
@@ -1056,6 +1096,7 @@ function switchTab(tab) {
     }
     if (tab === "storyboard" && state.activeProject) {
         void refreshServerAssetsForActiveProject();
+        void refreshStoryboardRunPicker();
     }
 }
 
@@ -1271,14 +1312,13 @@ function mediaThumbInnerHtml(m) {
     const col = TYPE_COLORS[t] || "#333";
     const icon = TYPE_ICONS[t] || "📁";
     const abs = resolveAssetPreviewUrl(m.url);
-    /* 网格：小 JPEG 缩略图 API + 滚动容器内 IO；不用 <video> / 原图，避免 MP4 片段与大图拖慢列表。 */
+    /* 网格：直接写缩略图 src（内部滚动容器下占位+IO 易出上半区不解码）；不用 <video> 避免多路解码。 */
     if (t === "video" && abs) {
         const thumb = frameosMediaThumbUrl(abs, "video", THUMB_GRID_W, THUMB_GRID_H);
         if (thumb) {
             return (
-                `<img class="media-thumb-img" src="${escAttr(THUMB_BLANK_PIXEL)}" data-vws-src="${escAttr(thumb)}" alt="" ` +
-                `width="${THUMB_GRID_W}" height="${THUMB_GRID_H}" decoding="async" fetchpriority="low" referrerpolicy="no-referrer" ` +
-                `style="width:100%;height:100%;object-fit:cover">`
+                `<img class="media-thumb-img" src="${escAttr(thumb)}" alt="" ` +
+                `width="${THUMB_GRID_W}" height="${THUMB_GRID_H}" decoding="async" fetchpriority="low" referrerpolicy="no-referrer">`
             );
         }
         return `<div class="media-thumb-video-ph" title="在详情中播放"><span class="media-thumb-video-ph__play" aria-hidden="true">▶</span><span class="media-thumb-video-ph__label">VIDEO</span></div>`;
@@ -1288,9 +1328,8 @@ function mediaThumbInnerHtml(m) {
         const fail = mediaThumbFailoverAttrs(thumb, m.url);
         if (thumb) {
             return (
-                `<img class="media-thumb-img" src="${escAttr(THUMB_BLANK_PIXEL)}" data-vws-src="${escAttr(thumb)}" alt="" ` +
-                `width="${THUMB_GRID_W}" height="${THUMB_GRID_H}" decoding="async" fetchpriority="low" referrerpolicy="no-referrer" ` +
-                `style="width:100%;height:100%;object-fit:cover"${fail}>`
+                `<img class="media-thumb-img" src="${escAttr(thumb)}" alt="" ` +
+                `width="${THUMB_GRID_W}" height="${THUMB_GRID_H}" decoding="async" fetchpriority="low" referrerpolicy="no-referrer"${fail}>`
             );
         }
         return `<img class="media-thumb-img" src="${escAttr(abs)}" alt="" loading="lazy" decoding="async" fetchpriority="low" referrerpolicy="no-referrer">`;
@@ -1380,9 +1419,11 @@ function syncMediaGridSelectionFromState() {
 
 function refreshMediaGridView() {
     const grid = document.getElementById("media-grid");
+    const importHost = document.getElementById("media-import-host");
     if (!state.activeProject) {
         state.libraryBulkSelectedIds = {};
         updateLibraryBulkToolbar();
+        if (importHost) importHost.hidden = true;
         if (grid) {
             grid.innerHTML =
                 '<div style="grid-column:1/-1;padding:2rem;text-align:center;color:var(--muted);font-size:0.6875rem;letter-spacing:0.06em;">← 从左侧选择项目，或新建项目</div>';
@@ -1395,16 +1436,16 @@ function refreshMediaGridView() {
 
 function renderMediaGrid(media) {
     const grid = document.getElementById("media-grid");
+    const importHost = document.getElementById("media-import-host");
     if (!grid) return;
     if (!media || !media.length) {
+        if (importHost) importHost.hidden = true;
         grid.innerHTML =
             '<div style="grid-column:1/-1;padding:2rem;text-align:center;color:var(--muted);font-size:0.6875rem;">此项目暂无素材，点击「导入素材」添加</div>';
         return;
     }
-    let html = `<div class="drop-zone" onclick="document.getElementById('file-upload').click()">
-    <div class="drop-zone-icon">↑</div>
-    拖拽文件至此处，或点击导入素材
-  </div>`;
+    if (importHost) importHost.hidden = false;
+    let html = "";
     media.forEach(m => {
         const isSelected = state.selectedMedia && state.selectedMedia.id === m.id;
         const t = m.type || 'image';
@@ -1424,7 +1465,6 @@ ${mediaCheckSlotHtml(m)}
     </div>`;
     });
     grid.innerHTML = html;
-    hydrateLazyThumbnails(grid);
 }
 
 function selectMedia(id) {
@@ -1535,26 +1575,107 @@ function inferUploadMediaKind(file) {
 }
 
 function handleFileUpload(e) {
-    if (!state.activeProject) { alert('请先选择项目'); return; }
-    const files = Array.from(e.target.files);
+    if (!state.activeProject) {
+        alert("请先选择项目");
+        return;
+    }
+    if (CONFIG.USE_MOCK_API) {
+        showToast("当前为 Mock API，无法上传");
+        return;
+    }
+    const input = e.target;
+    const proj = state.activeProject;
+    const pid = String(proj.id);
+    const files = Array.from(input.files || []);
+    input.value = "";
+
     files.forEach((f, i) => {
         const type = inferUploadMediaKind(f);
-        const id = Date.now() + i;
-        const library = type === 'video' ? 'video' : 'asset';
+        const tempId = Date.now() + i;
+        const library = type === "video" ? "video" : "asset";
         const objectUrl = URL.createObjectURL(f);
-        state.activeProject.media.push({
-            id,
+        proj.media.push({
+            id: tempId,
             name: f.name,
             type,
             size: formatSize(f.size),
             library,
             url: objectUrl,
             _localObjectUrl: true,
+            _uploadPending: true,
         });
+
+        void (async () => {
+            try {
+                const row = await uploadAssetRemote(pid, f);
+                if (!row || row.uri == null) throw new Error("服务端未返回 uri");
+                const hit = proj.media.find((m) => m.id === tempId);
+                if (!hit) return;
+                if (hit._localObjectUrl && hit.url && String(hit.url).startsWith("blob:")) {
+                    try {
+                        URL.revokeObjectURL(hit.url);
+                    } catch {
+                        /* ignore */
+                    }
+                }
+                const sid = Number(row.id);
+                hit.url = String(row.uri);
+                hit._localObjectUrl = false;
+                delete hit._uploadPending;
+                hit.source = "server";
+                if (Number.isFinite(sid)) {
+                    hit._serverAssetId = sid;
+                    hit.id = SERVER_ASSET_ID_BASE + sid;
+                }
+                if (row.name) hit.name = String(row.name);
+                if (row.library === "video" || row.library === "asset" || row.library === "storyboard") {
+                    hit.library = row.library;
+                }
+                const rk = String(row.kind || "").toLowerCase();
+                if (rk === "video") hit.type = "video";
+                else if (rk === "audio") hit.type = "audio";
+                else if (rk === "storyboard") hit.type = "storyboard";
+                else hit.type = "image";
+                const meta = row.meta && typeof row.meta === "object" ? row.meta : {};
+                if (meta.size != null) {
+                    const nb = Number(meta.size);
+                    hit.size = Number.isFinite(nb) ? formatSize(nb) : String(meta.size);
+                }
+
+                saveProjectsToStorage();
+                if (state.activeProject && String(state.activeProject.id) === pid) {
+                    refreshMediaGridView();
+                    renderProjects();
+                    setTopbarInfo(proj.name + " · " + projectMediaCount(proj) + " 个素材");
+                    updateContextChips();
+                }
+            } catch (err) {
+                const hit = proj.media.find((m) => m.id === tempId);
+                if (hit && hit.url && String(hit.url).startsWith("blob:")) {
+                    try {
+                        URL.revokeObjectURL(hit.url);
+                    } catch {
+                        /* ignore */
+                    }
+                }
+                const idx = proj.media.findIndex((m) => m.id === tempId);
+                if (idx >= 0) proj.media.splice(idx, 1);
+                saveProjectsToStorage();
+                if (state.activeProject && String(state.activeProject.id) === pid) {
+                    refreshMediaGridView();
+                    renderProjects();
+                    setTopbarInfo(proj.name + " · " + projectMediaCount(proj) + " 个素材");
+                    updateContextChips();
+                }
+                const msg = err && err.message ? err.message : String(err);
+                showToast("上传失败：" + msg.slice(0, 160));
+            }
+        })();
     });
+
     refreshMediaGridView();
     renderProjects();
-    setTopbarInfo(state.activeProject.name + ' · ' + projectMediaCount(state.activeProject) + ' 个素材');
+    setTopbarInfo(proj.name + " · " + projectMediaCount(proj) + " 个素材");
     updateContextChips();
     saveProjectsToStorage();
 }
@@ -2851,8 +2972,94 @@ function clearSbProgressUi() {
     if (box) box.hidden = true;
     const links = document.getElementById("sb-result-links");
     if (links) links.innerHTML = "";
+    const frames = document.getElementById("sb-result-frames");
+    if (frames) frames.innerHTML = "";
+    const flabel = document.getElementById("sb-result-frames-label");
+    if (flabel) flabel.hidden = true;
+    const fv = document.getElementById("sb-result-final-video-wrap");
+    if (fv) {
+        fv.innerHTML = "";
+        fv.hidden = true;
+    }
+    const fvl = document.getElementById("sb-result-final-video-label");
+    if (fvl) fvl.hidden = true;
     const st = document.getElementById("sb-form-status");
     if (st) st.textContent = "";
+}
+
+/** 分镜流水线完成：在结果区展示本轮全部出图（与 done 事件中 shot_frames 对应） */
+function renderStoryboardDoneFrames(ev) {
+    const framesEl = document.getElementById("sb-result-frames");
+    const label = document.getElementById("sb-result-frames-label");
+    if (!framesEl) return;
+    framesEl.innerHTML = "";
+    const rows = ev && Array.isArray(ev.shot_frames) ? ev.shot_frames : [];
+    if (label) label.hidden = rows.length === 0;
+    const total = ev && Number.isFinite(Number(ev.shot_count)) ? Number(ev.shot_count) : rows.length;
+    for (const row of rows) {
+        const raw = row && row.image_url != null ? String(row.image_url).trim() : "";
+        if (!raw) continue;
+        const abs = resolveAssetPreviewUrl(raw);
+        if (!abs) continue;
+        const shotId = row && row.shot_id != null ? String(row.shot_id) : "";
+        const idx = row && row.index != null ? Number(row.index) : 0;
+        const capParts = [];
+        if (idx > 0) capParts.push(`第 ${idx} 镜`);
+        if (total > 0) capParts.push(`共 ${total} 镜`);
+        const cap = [shotId, capParts.join(" · ")].filter(Boolean).join(" — ") || "分镜";
+
+        const cell = document.createElement("div");
+        cell.className = "sb-result-frame-cell";
+        cell.setAttribute("role", "listitem");
+
+        const a = document.createElement("a");
+        a.className = "sb-result-frame-link";
+        a.href = abs;
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        a.title = "在新标签页打开原图";
+
+        const img = document.createElement("img");
+        img.className = "sb-result-frame-img";
+        img.src = abs;
+        img.alt = cap;
+        img.loading = "lazy";
+        img.decoding = "async";
+        img.referrerPolicy = "no-referrer";
+
+        const figcap = document.createElement("div");
+        figcap.className = "sb-result-frame-caption";
+        figcap.textContent = cap;
+
+        a.appendChild(img);
+        cell.appendChild(a);
+        cell.appendChild(figcap);
+        framesEl.appendChild(cell);
+    }
+}
+
+/** 分镜成片：在结果区预览最终 MP4（与视频库 uri 一致） */
+function renderStoryboardFinalVideo(uri) {
+    const wrap = document.getElementById("sb-result-final-video-wrap");
+    const label = document.getElementById("sb-result-final-video-label");
+    if (!wrap) return;
+    const raw = uri != null ? String(uri).trim() : "";
+    if (!raw) {
+        wrap.innerHTML = "";
+        wrap.hidden = true;
+        if (label) label.hidden = true;
+        return;
+    }
+    const abs = resolveAssetPreviewUrl(raw);
+    if (!abs) {
+        wrap.innerHTML = "";
+        wrap.hidden = true;
+        if (label) label.hidden = true;
+        return;
+    }
+    if (label) label.hidden = false;
+    wrap.hidden = false;
+    wrap.innerHTML = `<video class="sb-result-final-video" src="${escAttr(abs)}" controls playsinline preload="metadata" referrerpolicy="no-referrer"></video>`;
 }
 
 function formatSbEvent(ev) {
@@ -2881,8 +3088,17 @@ function formatSbEvent(ev) {
     }
     if (t === "pipeline_done") return { text: `剧本与分镜 JSON 就绪：共 ${ev.shot_count} 镜`, cls: "sb-log-line--done" };
     if (t === "wan_shot_done") return { text: `镜头 ${ev.index}/${ev.total} 出图完成 · ${ev.shot_id}`, cls: "" };
+    if (t === "video_run_start")
+        return {
+            text: `成片任务开始 · ${ev.shot_total != null ? `共 ${ev.shot_total} 镜` : ""}（run ${ev.run_id || ""}）`.trim(),
+            cls: "sb-log-line--step",
+        };
+    if (t === "shot_video_done")
+        return { text: `镜头 ${ev.index}/${ev.total} 视频完成 · ${ev.shot_id || ""}`, cls: "sb-log-line--done" };
     if (t === "artifact") return { text: `已写出 ${ev.kind || "文件"}：${ev.uri || ""}`, cls: "sb-log-line--done" };
     if (t === "error") return { text: `错误：${ev.message || ""}`, cls: "sb-log-line--err" };
+    if (t === "done" && ev.final_video_uri)
+        return { text: "成片完成：已拼接并登记到当前项目视频库", cls: "sb-log-line--done" };
     if (t === "done") return { text: `全部完成：${ev.shot_count} 镜（已写入当前项目分镜库）`, cls: "sb-log-line--done" };
     return { text: JSON.stringify(ev).slice(0, 240), cls: "" };
 }
@@ -2894,19 +3110,167 @@ function openStoryboardLibraryInProject() {
 }
 
 function cancelStoryboardPipeline() {
+    storyboardChainVideoAfter = false;
     if (storyboardStreamAbort) {
         storyboardStreamAbort.abort();
         storyboardStreamAbort = null;
     }
     const runBtn = document.getElementById("sb-run-btn");
+    const oneStopBtn = document.getElementById("sb-one-stop-btn");
     const cbtn = document.getElementById("sb-cancel-btn");
     if (runBtn) runBtn.disabled = false;
+    if (oneStopBtn) oneStopBtn.disabled = false;
     if (cbtn) cbtn.style.display = "none";
     showToast("已取消");
 }
 
+function syncVideoRunIdInputFromPick() {
+    const sel = document.getElementById("sb-video-run-pick");
+    const inp = document.getElementById("sb-video-run-id");
+    if (!sel || !inp || !sel.value) return;
+    inp.value = String(sel.value).trim();
+}
+
+function onStoryboardRunPickChange(_ev) {
+    syncVideoRunIdInputFromPick();
+}
+
+/** 优先使用下拉所选 run，否则用手动输入框 */
+function getStoryboardVideoRunId() {
+    const sel = document.getElementById("sb-video-run-pick");
+    const fromSel =
+        sel && sel.value && String(sel.value).trim() !== "" ? String(sel.value).trim() : "";
+    const fromInput = (document.getElementById("sb-video-run-id")?.value ?? "").trim();
+    return fromSel || fromInput;
+}
+
+/**
+ * 拉取本项目 storyboard_runs 目录，填充成片下拉。
+ * @param {string} [preferredRunId]  刷新后选中该项（若存在）
+ */
+async function refreshStoryboardRunPicker(preferredRunId) {
+    const sel = document.getElementById("sb-video-run-pick");
+    if (!sel) return;
+    if (!state.activeProject) {
+        sel.innerHTML = '<option value="">— 请先选择项目 —</option>';
+        return;
+    }
+    const pid = String(state.activeProject.id);
+    const prev = preferredRunId || sel.value || "";
+    sel.innerHTML = '<option value="">— 选择分镜目录（含 storyboard_script.md）—</option>';
+    try {
+        const rows = await fetchStoryboardRuns(pid);
+        for (const r of rows) {
+            if (!r || !r.run_id) continue;
+            const opt = document.createElement("option");
+            opt.value = String(r.run_id);
+            let t = r.label ? String(r.label) : String(r.run_id);
+            if (r.ready_for_video === true) t += " · 可成片";
+            else if (r.has_json && r.shot_count != null) t += " · 尚有镜缺图";
+            else if (!r.has_json) t += " · 无 storyboard.json";
+            opt.textContent = t;
+            sel.appendChild(opt);
+        }
+        const want = String(prev).trim();
+        if (want && [...sel.options].some((o) => o.value === want)) {
+            sel.value = want;
+            syncVideoRunIdInputFromPick();
+        }
+    } catch (e) {
+        console.warn("[FrameOS] refreshStoryboardRunPicker", e);
+    }
+}
+
+function cancelStoryboardVideoPipeline() {
+    if (storyboardVideoStreamAbort) {
+        storyboardVideoStreamAbort.abort();
+        storyboardVideoStreamAbort = null;
+    }
+    const runBtn = document.getElementById("sb-video-run-btn");
+    const cbtn = document.getElementById("sb-video-cancel-btn");
+    if (runBtn) runBtn.disabled = false;
+    if (cbtn) cbtn.style.display = "none";
+    const st = document.getElementById("sb-form-status");
+    if (st) st.textContent = "";
+    showToast("已取消成片任务");
+}
+
+async function submitStoryboardVideoPipeline() {
+    if (!state.activeProject) {
+        showToast("请先选择项目");
+        return;
+    }
+    const pid = String(state.activeProject.id);
+    syncVideoRunIdInputFromPick();
+    const runId = getStoryboardVideoRunId();
+    if (!runId || runId.length < 12) {
+        showToast("请从上方下拉选择分镜，或在 run id 框填写 storyboard_runs 目录名");
+        return;
+    }
+    renderStoryboardFinalVideo("");
+    const runBtn = document.getElementById("sb-video-run-btn");
+    const cbtn = document.getElementById("sb-video-cancel-btn");
+    if (runBtn) runBtn.disabled = true;
+    if (cbtn) cbtn.style.display = "";
+    const st = document.getElementById("sb-form-status");
+    if (st) st.textContent = "成片生成中…";
+
+    storyboardVideoStreamAbort?.abort();
+    storyboardVideoStreamAbort = new AbortController();
+
+    let streamHadErrorEvent = false;
+    try {
+        await streamStoryboardVideoPipeline(
+            pid,
+            runId,
+            (ev) => {
+                if (ev && ev.type === "error") streamHadErrorEvent = true;
+                const f = formatSbEvent(ev);
+                if (f.text) appendSbLog(f.text, f.cls);
+                if (ev && ev.type === "done" && ev.final_video_uri) {
+                    const box = document.getElementById("sb-result-box");
+                    if (box) box.hidden = false;
+                    renderStoryboardFinalVideo(String(ev.final_video_uri));
+                }
+            },
+            storyboardVideoStreamAbort.signal,
+        );
+    } catch (e) {
+        if (st) st.textContent = "";
+        if (runBtn) runBtn.disabled = false;
+        if (cbtn) cbtn.style.display = "none";
+        storyboardVideoStreamAbort = null;
+        if (e && e.name === "AbortError") return;
+        const msg = e && e.message ? e.message : String(e);
+        appendSbLog("成片请求失败：" + msg, "sb-log-line--err");
+        showToast(msg.slice(0, 140));
+        return;
+    }
+    if (st) st.textContent = "";
+    if (runBtn) runBtn.disabled = false;
+    if (cbtn) cbtn.style.display = "none";
+    storyboardVideoStreamAbort = null;
+    await refreshServerAssetsForActiveProject();
+    if (!streamHadErrorEvent) showToast("成片已保存到视频库");
+}
+
+/**
+ * 一键：生成分镜（含镜头图）→ 成功后立即接「从分镜生成成片视频」。
+ * 若选择「仅 JSON」未出图，无法成片，会提示改选项。
+ */
+function submitStoryboardOneStopPipeline() {
+    const genImg = (document.getElementById("sb-gen-images")?.value || "true") === "true";
+    if (!genImg) {
+        showToast("一键成片需要开启「生成镜头图」；请改出图选项或先用「开始生成分镜」再手动成片");
+        return;
+    }
+    storyboardChainVideoAfter = true;
+    submitStoryboardPipeline();
+}
+
 async function submitStoryboardPipeline() {
     if (!state.activeProject) {
+        storyboardChainVideoAfter = false;
         showToast("请先选择项目");
         return;
     }
@@ -2914,11 +3278,13 @@ async function submitStoryboardPipeline() {
     const desc = document.getElementById("sb-description")?.value?.trim() || "";
     const hotword = document.getElementById("sb-hotword")?.value?.trim() || "";
     if (!desc || !hotword) {
+        storyboardChainVideoAfter = false;
         showToast("请填写视频需求与热点词");
         return;
     }
     const n = storyboardPipelinePicks.length;
     if (n < 1 || n > 3) {
+        storyboardChainVideoAfter = false;
         showToast("请选择 1–3 张产品图（素材库与本地上传合计）");
         return;
     }
@@ -2938,6 +3304,7 @@ async function submitStoryboardPipeline() {
             }
         }
     } catch {
+        storyboardChainVideoAfter = false;
         showToast("无法读取某张素材库图片，请重试或改本地上传");
         return;
     }
@@ -2957,10 +3324,13 @@ async function submitStoryboardPipeline() {
         fd.append("images", files[i]);
     }
 
+    lastStoryboardRunId = null;
     clearSbProgressUi();
     const runBtn = document.getElementById("sb-run-btn");
+    const oneStopBtn = document.getElementById("sb-one-stop-btn");
     const cbtn = document.getElementById("sb-cancel-btn");
     if (runBtn) runBtn.disabled = true;
+    if (oneStopBtn) oneStopBtn.disabled = true;
     if (cbtn) cbtn.style.display = "";
 
     storyboardStreamAbort?.abort();
@@ -2975,6 +3345,7 @@ async function submitStoryboardPipeline() {
         const f = formatSbEvent(ev);
         if (f.text) appendSbLog(f.text, f.cls);
         if (ev && ev.type === "done") {
+            if (ev.run_id) lastStoryboardRunId = String(ev.run_id);
             const box = document.getElementById("sb-result-box");
             const links = document.getElementById("sb-result-links");
             if (box && links) {
@@ -2993,20 +3364,41 @@ async function submitStoryboardPipeline() {
                     );
                 }
                 links.innerHTML = parts.join("") || "—";
+                renderStoryboardDoneFrames(ev);
             }
+            const ridIn = document.getElementById("sb-video-run-id");
+            if (ridIn && ev.run_id) ridIn.value = String(ev.run_id);
+            if (ev.run_id) void refreshStoryboardRunPicker(String(ev.run_id));
         }
     }, storyboardStreamAbort.signal)
         .then(async () => {
             if (st) st.textContent = "";
             if (runBtn) runBtn.disabled = false;
+            if (oneStopBtn) oneStopBtn.disabled = false;
             if (cbtn) cbtn.style.display = "none";
             storyboardStreamAbort = null;
             await refreshServerAssetsForActiveProject();
+            const chain = storyboardChainVideoAfter;
+            const rid = lastStoryboardRunId;
+            storyboardChainVideoAfter = false;
+            if (!streamHadErrorEvent && chain && rid) {
+                appendSbLog("分镜已完成，自动开始成片…", "sb-log-line--step");
+                showToast("分镜完成，正在一键成片…");
+                const ridIn = document.getElementById("sb-video-run-id");
+                if (ridIn) ridIn.value = rid;
+                await refreshStoryboardRunPicker(rid);
+                const sel = document.getElementById("sb-video-run-pick");
+                if (sel && [...sel.options].some((o) => o.value === rid)) sel.value = rid;
+                await submitStoryboardVideoPipeline();
+                return;
+            }
             if (!streamHadErrorEvent) showToast("分镜已保存到当前项目");
         })
         .catch((e) => {
+            storyboardChainVideoAfter = false;
             if (st) st.textContent = "";
             if (runBtn) runBtn.disabled = false;
+            if (oneStopBtn) oneStopBtn.disabled = false;
             if (cbtn) cbtn.style.display = "none";
             storyboardStreamAbort = null;
             if (e && e.name === "AbortError") return;
@@ -3100,7 +3492,12 @@ export function mountFrameOS() {
         analyzeVideo,
         submitDouyinFetch,
         submitStoryboardPipeline,
+        submitStoryboardOneStopPipeline,
         cancelStoryboardPipeline,
+        submitStoryboardVideoPipeline,
+        cancelStoryboardVideoPipeline,
+        refreshStoryboardRunPicker,
+        onStoryboardRunPickChange,
         openStoryboardLibraryPicker,
         closeStoryboardLibraryPicker,
         confirmStoryboardLibraryPicker,

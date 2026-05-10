@@ -6,6 +6,7 @@
   DASHSCOPE_BASE_URL 可选，默认北京 https://dashscope.aliyuncs.com/api/v1
                       新加坡：https://dashscope-intl.aliyuncs.com/api/v1
   DASHSCOPE_WAN_USE_SYNC  若设为 1/true，强制走同步 ImageGeneration.call（易触发约 298s 流式超时，不推荐）
+  STORYBOARD_STRICT_PRODUCT_REF  默认 1：分镜逐镜出图追加「产品锁死」约束；0/false 关闭
 
 依赖：pip install dashscope>=1.25.15
 
@@ -25,6 +26,28 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 _MAX_PROMPT_CHARS = 5000
+
+
+def _strict_product_lock_enabled() -> bool:
+    v = os.getenv("STORYBOARD_STRICT_PRODUCT_REF", "1").strip().lower()
+    return v not in ("0", "false", "no", "off", "")
+
+
+def _strict_product_lock_preamble(*, dual_ref: bool) -> str:
+    if dual_ref:
+        return (
+            "【产品锁死·强制】参考图1=人物模特，参考图2=用户上传的产品实拍。"
+            "画面中出现的产品必须与参考图2为同一包装：外轮廓、比例、泵头/盖结构、标签版式、LOGO 形状、印刷文字、主辅色须与图2一致，"
+            "禁止替换为其它品牌、禁止臆造瓶型或「通用电商洗发水瓶」、禁止改动标签文案与图形。"
+            "若下方镜头描述中的 product/瓶型/圆柱/磨砂等词与参考图2视觉不一致，一律以参考图2为准并忽略冲突描述。"
+            "图1仅用于锁定人物面部、发型、体型与衣着，不得换脸。"
+        )
+    return (
+        "【产品锁死·强制】参考图1=用户上传的产品实拍。"
+        "画面中出现的产品必须与参考图1为同一包装：外轮廓、比例、泵头/盖结构、标签版式、LOGO、文字、配色须与图1一致，"
+        "禁止替换品牌、禁止臆造包装、禁止改成其它常见瓶型。"
+        "若下方镜头描述中的 product/瓶型/材质等与参考图1不一致，一律以参考图1为准并忽略冲突描述。"
+    )
 
 
 def configure_dashscope() -> None:
@@ -119,7 +142,7 @@ def wan_generate_shot_frame(
     reference_paths: str | Path | Sequence[str | Path],
     *,
     api_key: Optional[str] = None,
-    model: str = "wan2.7-image",
+    model: str = "wan2.7-image-pro",
     size: str = "2K",
     watermark: bool = False,
 ) -> str:
@@ -140,18 +163,23 @@ def wan_generate_shot_frame(
     configure_dashscope()
     paths = _coerce_wan_reference_paths(reference_paths)
     image_parts = [{"image": encode_file_data_uri(p)} for p in paths]
+    dual = len(paths) > 1
     if len(paths) == 1:
         suffix = (
-            "参考图1中的产品外观、瓶型、标签配色与材质，生成电影分镜单帧静态图，"
-            "严格符合上述构图与光影描述，画面无字幕、无画框、无水印式装饰。"
+            "在参考图1产品外观完全不变的前提下，生成电影分镜单帧静态图；"
+            "遵循上方镜头构图、机位与光影；画面无字幕、无画框、无水印式装饰。"
         )
     else:
         suffix = (
-            "【双参考】参考图1为人物模特：须保持其面部、发型、须型、体型与衣着与图1一致，不得换脸成其他模特。"
-            "参考图2为产品包装：画面中出现该商品时，瓶型、标签、LOGO 与主色须与图2完全一致，不得替换为其他品牌或臆造包装。"
-            "在以上构图与光影描述基础上生成电影分镜单帧，无字幕、无画框、无水印式装饰。"
+            "【双参考执行】人物以参考图1为准；产品以参考图2为准，手持物必须是图2所示实物，不得变形走样。"
+            "在镜头描述基础上生成单帧静态图；无字幕、无画框、无水印式装饰。"
         )
-    body = (f"{text_prompt.strip()}\n\n{suffix}")[:_MAX_PROMPT_CHARS]
+    pre = (
+        _strict_product_lock_preamble(dual_ref=dual) + "\n\n"
+        if _strict_product_lock_enabled()
+        else ""
+    )
+    body = (f"{pre}{text_prompt.strip()}\n\n{suffix}")[:_MAX_PROMPT_CHARS]
 
     message = Message(
         role="user",
@@ -214,7 +242,7 @@ def fill_storyboard_shots_with_wan(
     *,
     character_reference_image_path: str | Path | None = None,
     api_key: Optional[str] = None,
-    model: str = "wan2.7-image",
+    model: str = "wan2.7-image-pro",
     size: str = "2K",
     watermark: bool = False,
     delay_sec: float = 0.35,

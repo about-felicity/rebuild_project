@@ -6,14 +6,19 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-_DEMO_DIR = Path(__file__).resolve().parent.parent / "demo"
+_ROOT = Path(__file__).resolve().parent.parent
+_DEMO_DIR = _ROOT / "demo"
+_TOOL_DIR = _ROOT / "tool"
 if str(_DEMO_DIR) not in sys.path:
     sys.path.insert(0, str(_DEMO_DIR))
+if str(_TOOL_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOL_DIR))
 
 from storyboard_pipeline import (  # noqa: E402
     PipelineInput,
@@ -28,8 +33,21 @@ from storyboard_pipeline import (  # noqa: E402
 )
 from wan_image_client import fill_storyboard_shots_with_wan  # noqa: E402
 
+from seedream_client import (  # noqa: E402
+    DEFAULT_ARK_SEEDREAM_MODEL,
+    fill_storyboard_shots_with_seedream,
+)
+
 from data.db import insert_project_asset
 from data.media_mirror import ensure_project_media_dir
+
+
+def _storyboard_image_provider() -> str:
+    return (
+        "wan"
+        if os.getenv("IMAGE_GENERATION_PROVIDER", "seedream").strip().lower() == "wan"
+        else "seedream"
+    )
 
 
 def normalize_shot_frame_urls(
@@ -61,7 +79,7 @@ def run_storyboard_for_project(
     style: str = "写实",
     generate_shot_images: bool = True,
     write_prompt_preview: bool = True,
-    wan_model: str = "wan2.7-image",
+    wan_model: str | None = None,
     wan_size: str = "2K",
     product_ref_index: Optional[int] = None,
     callback: Callable[[dict[str, Any]], None] | None = None,
@@ -98,7 +116,11 @@ def run_storyboard_for_project(
 
     result = run_pipeline_with_events(pi, on_event=emit)
     shots = result.shots
-    fill_generated_prompts(shots, result.product_desc, None)
+    cv = result.product_desc.get("character_visual")
+    cv = cv if isinstance(cv, dict) else {}
+    ce = str(cv.get("character_prompt_en") or result.product_desc.get("character_prompt_en") or "").strip()
+    char_descs = {"char_001": ce} if ce else None
+    fill_generated_prompts(shots, result.product_desc, char_descs)
 
     json_path = run_dir / "storyboard.json"
     frames_rel_dir = "storyboard_frames"
@@ -127,22 +149,35 @@ def run_storyboard_for_project(
         char_ref: str | None = None
         if tidx is not None and tidx != widx:
             char_ref = str(Path(abs_image_paths[tidx]).resolve())
-        wan_lbl = (
-            "万相逐镜出图（图1人物 + 图2产品）"
-            if char_ref
-            else "万相逐镜出图（产品参考 第 " + str(widx + 1) + "/" + str(n_paths) + " 张）"
-        )
+        prov = _storyboard_image_provider()
+        if prov == "wan":
+            batch_lbl = (
+                "万相逐镜出图（图1人物 + 图2产品）"
+                if char_ref
+                else "万相逐镜出图（产品参考 第 " + str(widx + 1) + "/" + str(n_paths) + " 张）"
+            )
+        else:
+            batch_lbl = (
+                "Seedream 逐镜出图（图1人物 + 图2产品）"
+                if char_ref
+                else "Seedream 逐镜出图（产品参考 第 "
+                + str(widx + 1)
+                + "/"
+                + str(n_paths)
+                + " 张）"
+            )
         emit(
             {
                 "type": "step",
                 "id": "wan_batch",
-                "label": wan_lbl,
+                "label": batch_lbl,
                 "wan_ref_index": widx,
                 "wan_talent_index": tidx,
+                "image_provider": prov,
             }
         )
 
-        def on_wan_done(_i: int, _total: int, shot_id: str, _rel_url: str) -> None:
+        def on_shot_done(_i: int, _total: int, shot_id: str, _rel_url: str) -> None:
             normalize_shot_frame_urls(shots, media_seg, run_id)
             emit(
                 {
@@ -153,17 +188,34 @@ def run_storyboard_for_project(
                 }
             )
 
-        fill_storyboard_shots_with_wan(
-            shots,
-            prod_ref,
-            frames_dir,
-            frames_rel_dir,
-            character_reference_image_path=char_ref,
-            model=wan_model,
-            size=wan_size,
-            watermark=False,
-            on_shot_done=on_wan_done,
-        )
+        if prov == "wan":
+            wm = (wan_model or "").strip() or "wan2.7-image-pro"
+            fill_storyboard_shots_with_wan(
+                shots,
+                prod_ref,
+                frames_dir,
+                frames_rel_dir,
+                character_reference_image_path=char_ref,
+                model=wm,
+                size=wan_size,
+                watermark=False,
+                on_shot_done=on_shot_done,
+            )
+        else:
+            sm = (wan_model or "").strip() or os.getenv(
+                "ARK_IMAGE_MODEL", DEFAULT_ARK_SEEDREAM_MODEL
+            ).strip()
+            fill_storyboard_shots_with_seedream(
+                shots,
+                prod_ref,
+                frames_dir,
+                frames_rel_dir,
+                character_reference_image_path=char_ref,
+                model=sm,
+                size=wan_size,
+                watermark=False,
+                on_shot_done=on_shot_done,
+            )
         normalize_shot_frame_urls(shots, media_seg, run_id)
         emit({"type": "step_done", "id": "wan_batch", "detail": f"{len(shots)} 镜"})
 
@@ -232,6 +284,18 @@ def run_storyboard_for_project(
                 },
             )
 
+    shot_frames: list[dict[str, Any]] = []
+    if generate_shot_images:
+        for idx, shot in enumerate(shots):
+            fr = shot.get("frame") or {}
+            img_u = (fr.get("image_url") or "").strip()
+            if not img_u:
+                continue
+            shot_id = str(shot.get("shot_id") or f"shot_{idx + 1}")
+            shot_frames.append(
+                {"shot_id": shot_id, "image_url": img_u, "index": idx + 1}
+            )
+
     out = {
         "run_id": run_id,
         "asset_id": asset_id,
@@ -239,6 +303,7 @@ def run_storyboard_for_project(
         "script_uri": script_uri,
         "shot_count": len(shots),
         "project_id": pid,
+        "shot_frames": shot_frames,
     }
     emit({"type": "done", **out})
     return out

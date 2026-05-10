@@ -33,6 +33,11 @@ from ai import (
     extract_wan_image_urls_from_response,
     normalize_first_frame_url_for_ark,
 )
+from seedream_client import (
+    SeedreamImageClient,
+    collect_result_image_urls,
+    coerce_seedream_size,
+)
 
 # —— destination → provider asset category (strings your hub understands) ——
 DST_TO_ASSET_CATEGORY: dict[str, str] = {
@@ -63,6 +68,16 @@ LayeredImagePromptFn = Callable[[str, str], str]
 LayeredVideoPromptFn = Callable[[str, list[str] | None], str]
 
 
+def _image_generation_provider() -> str:
+    """``wan``=DashScope 万相；默认 ``seedream``=火山 Ark ``/images/generations``。"""
+    v = os.getenv("IMAGE_GENERATION_PROVIDER", "seedream").strip().lower()
+    return "wan" if v == "wan" else "seedream"
+
+
+def _ark_image_model() -> str:
+    return os.getenv("ARK_IMAGE_MODEL", "doubao-seedream-5-0-260128").strip()
+
+
 @runtime_checkable
 class MediaGenerationHub(Protocol):
     """
@@ -86,6 +101,8 @@ class WorkflowMediaEnvSnapshot:
     不包含密钥值，只包含「当前进程环境里能读到的模型名与 provider 开关」。
     """
 
+    image_generation_provider: str
+    ark_image_model: str
     dashscope_image_model: str
     dashscope_base_http: str
     video_provider: str
@@ -94,6 +111,8 @@ class WorkflowMediaEnvSnapshot:
     @classmethod
     def from_environ(cls) -> WorkflowMediaEnvSnapshot:
         return cls(
+            image_generation_provider=_image_generation_provider(),
+            ark_image_model=_ark_image_model(),
             dashscope_image_model=os.getenv("DASHSCOPE_IMAGE_MODEL", "wan2.7-image-pro").strip(),
             dashscope_base_http=os.getenv(
                 "DASHSCOPE_BASE_HTTP_API_URL",
@@ -101,7 +120,7 @@ class WorkflowMediaEnvSnapshot:
             ).strip(),
             video_provider=os.getenv("VIDEO_PROVIDER", "ark").strip().lower(),
             ark_video_model=os.getenv(
-                "ARK_VIDEO_MODEL", "doubao-seedance-1-0-pro-fast-251015"
+                "ARK_VIDEO_MODEL", "doubao-seedance-1-5-pro-251215"
             ).strip(),
         )
 
@@ -111,9 +130,12 @@ def format_workflow_media_routing_help() -> str:
     snap = WorkflowMediaEnvSnapshot.from_environ()
     return (
         "WorkFlow 默认媒体路由（见 backend/settings.MODEL_CONFIG）:\n"
-        f"  生图模型 env: DASHSCOPE_IMAGE_MODEL → 当前可读为 {snap.dashscope_image_model!r} "
-        f"(DashScope Wan HTTP multimodal-generation; 密钥 DASHSCOPE_API_KEY)\n"
-        f"  生图 API 基址: DASHSCOPE_BASE_HTTP_API_URL → {snap.dashscope_base_http!r}\n"
+        f"  生图 provider: IMAGE_GENERATION_PROVIDER → {snap.image_generation_provider!r} "
+        "(seedream=火山 Ark POST /images/generations；wan=DashScope 万相)\n"
+        f"  (seedream) ARK_IMAGE_MODEL → {snap.ark_image_model!r} "
+        "(密钥 SEEDREAM_API_KEY 或 ARK_API_KEY；基址 ARK_BASE_URL)\n"
+        f"  (wan) DASHSCOPE_IMAGE_MODEL → {snap.dashscope_image_model!r} "
+        f"(DashScope Wan；密钥 DASHSCOPE_API_KEY；基址 {snap.dashscope_base_http!r})\n"
         f"  视频 provider env: VIDEO_PROVIDER → {snap.video_provider!r}\n"
         f"  (ark 分支) ARK_VIDEO_MODEL → {snap.ark_video_model!r} "
         "(volcenginesdkarkruntime; 密钥 ARK_API_KEY)\n"
@@ -159,6 +181,28 @@ def _hub_env_bool(name: str, default: bool = False) -> bool:
     if v is None or not str(v).strip():
         return default
     return str(v).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _seedream_build_image_field(
+    input_images: list[str] | None,
+    media_root: str | None,
+) -> str | list[str] | None:
+    if not input_images:
+        return None
+    out: list[str] = []
+    for s in input_images:
+        x = (s or "").strip()
+        if not x:
+            continue
+        if x.startswith(("http://", "https://", "data:image/")):
+            out.append(x)
+            continue
+        out.append(normalize_first_frame_url_for_ark(x, media_root=media_root))
+    if not out:
+        return None
+    if len(out) == 1:
+        return out[0]
+    return out[:14]
 
 
 def _dashscope_wan_size_string(model_id: str, size: str, has_images: bool) -> str:
@@ -276,7 +320,8 @@ class LocalWanArkHub:
     """
     将 :class:`MediaGenerationRequestClient` 适配为 :class:`MediaGenerationHub`：
 
-    - 生图：Wan 同步接口，结果 URL 写入 ``output_payload["created_asset_ids"]``。
+    - 生图：默认 **Seedream**（``IMAGE_GENERATION_PROVIDER=seedream``）走 Ark ``POST /images/generations``；
+      设 ``IMAGE_GENERATION_PROVIDER=wan`` 时走 DashScope 万相同步接口。
     - 生视频：Ark 异步任务，靠 ``refresh_generation_task`` 轮询。
     """
 
@@ -303,6 +348,17 @@ class LocalWanArkHub:
         n: int = 1,
         size: str = "2K",
     ) -> EphemeralMediaTask:
+        if _image_generation_provider() == "seedream":
+            return self._submit_seedream_image_generation(
+                session=session,
+                prompt=prompt,
+                title=title,
+                asset_category=asset_category,
+                destination=destination,
+                input_images=input_images or [],
+                n=n,
+                size=size,
+            )
         if not self._client._image:
             raise RuntimeError("MediaGenerationRequestClient 未配置 image (DashScopeWanApiParams)")
         mid = self._client._image.model_id
@@ -341,6 +397,93 @@ class LocalWanArkHub:
                 "input_images": input_images or [],
                 "size": parameters.get("size"),
                 "n": parameters.get("n"),
+            },
+            output_payload={
+                "created_asset_ids": urls,
+                "image_urls": urls,
+                "provider_create_response": raw,
+            },
+        )
+        self._tasks[tid] = task
+        return task
+
+    def _submit_seedream_image_generation(
+        self,
+        *,
+        session: Any,
+        prompt: str,
+        title: str,
+        asset_category: Any,
+        destination: str,
+        input_images: list[str],
+        n: int,
+        size: str,
+    ) -> EphemeralMediaTask:
+        mid = _ark_image_model()
+        imgs = _seedream_build_image_field(input_images, self._media_root)
+        client = SeedreamImageClient.from_environ()
+        size_s = coerce_seedream_size(size)
+        n_req = min(max(int(n), 1), 15)
+        wm = _hub_env_bool(
+            "ARK_IMAGE_WATERMARK",
+            _hub_env_bool("DASHSCOPE_IMAGE_WATERMARK", False),
+        )
+        out_fmt = os.getenv("SEEDREAM_OUTPUT_FORMAT", "png").strip() or None
+        extra: dict[str, Any] = {}
+        if out_fmt:
+            extra["output_format"] = out_fmt
+        try:
+            timeout_sec = float(os.getenv("SEEDREAM_HTTP_TIMEOUT_SEC", "600").strip() or "600")
+        except ValueError:
+            timeout_sec = 600.0
+
+        if n_req <= 1:
+            raw = client.generate(
+                model=mid,
+                prompt=prompt,
+                image=imgs,
+                size=size_s,
+                sequential_image_generation="disabled",
+                response_format="url",
+                watermark=wm,
+                timeout_sec=timeout_sec,
+                **extra,
+            )
+        else:
+            raw = client.generate(
+                model=mid,
+                prompt=prompt,
+                image=imgs,
+                size=size_s,
+                sequential_image_generation="auto",
+                sequential_image_generation_options={"max_images": n_req},
+                response_format="url",
+                watermark=wm,
+                timeout_sec=timeout_sec,
+                **extra,
+            )
+        urls = collect_result_image_urls(raw)
+        if not urls:
+            raise RuntimeError(
+                f"Seedream returned no image urls: {json.dumps(raw, ensure_ascii=False)[:1200]}"
+            )
+
+        tid = str(uuid4())
+        task = EphemeralMediaTask(
+            id=tid,
+            status="success",
+            input_payload={
+                "kind": "image_generation",
+                "provider": "ark_seedream_sync",
+                "session": session,
+                "prompt": prompt,
+                "title": title,
+                "model_id": mid,
+                "asset_category": asset_category,
+                "destination": destination,
+                "input_images": input_images,
+                "size": size_s,
+                "n": n_req,
             },
             output_payload={
                 "created_asset_ids": urls,
@@ -403,7 +546,7 @@ class LocalWanArkHub:
 
     def refresh_generation_task(self, task: EphemeralMediaTask) -> EphemeralMediaTask:
         prov = (task.input_payload or {}).get("provider")
-        if prov in {"dashscope_wan_sync", "dashscope_sync"}:
+        if prov in {"dashscope_wan_sync", "dashscope_sync", "ark_seedream_sync"}:
             return task
         if prov != "ark":
             task.status = "failed"
@@ -513,6 +656,7 @@ def tool_generate_video(
     session: Any | None = None,
     layered_video_prompt: LayeredVideoPromptFn | None = None,
     submit_video_kwargs: Mapping[str, Any] | None = None,
+    wait_timeout_seconds: int = 120,
     client: MediaGenerationRequestClient | None = None,
     media_root: str | None = None,
 ) -> str:
@@ -534,6 +678,7 @@ def tool_generate_video(
         video_title=video_title,
         layered_video_prompt=layered_video_prompt,
         submit_video_kwargs=submit_video_kwargs,
+        wait_timeout_seconds=wait_timeout_seconds,
     )
 
 
@@ -879,6 +1024,7 @@ def run_generate_video(
     *,
     layered_video_prompt: LayeredVideoPromptFn | None = None,
     submit_video_kwargs: Mapping[str, Any] | None = None,
+    wait_timeout_seconds: int = 120,
 ) -> str:
     try:
         duration_seconds = int(duration) if duration is not None else 0
@@ -927,7 +1073,9 @@ def run_generate_video(
                     title=clip_title,
                 )
             )
-            task = wait_media_task(model_hub, task)
+            task = wait_media_task(
+                model_hub, task, timeout_seconds=int(wait_timeout_seconds)
+            )
             break
         except Exception as exc:
             last_exc = exc
