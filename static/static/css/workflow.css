@@ -48,6 +48,44 @@
             -webkit-font-smoothing: antialiased;
         }
 
+        /* 主模块未挂载前：避免误以为「浏览器坏了」 */
+        .frameos-boot-hint {
+            position: fixed;
+            inset: 0;
+            z-index: 2147483647;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 0.75rem;
+            padding: 1.5rem;
+            background: color-mix(in oklab, var(--bg) 92%, var(--fg));
+            color: var(--fg);
+            font-family: var(--font-ui);
+            font-size: 0.875rem;
+            text-align: center;
+        }
+
+        .frameos-boot-hint-title {
+            font-weight: 600;
+            letter-spacing: 0.04em;
+        }
+
+        .frameos-boot-hint-sub {
+            max-width: 28rem;
+            color: var(--muted);
+            font-size: 0.75rem;
+            line-height: 1.55;
+        }
+
+        .frameos-boot-hint code {
+            font-family: var(--font-mono);
+            font-size: 0.78rem;
+            padding: 0.08em 0.28em;
+            border-radius: 0.2rem;
+            background: color-mix(in oklab, var(--surface2) 90%, var(--fg));
+        }
+
         /* ===== LAYOUT ===== */
         .app {
             display: flex;
@@ -1088,6 +1126,135 @@
             display: flex;
             flex-direction: column;
             gap: 0.5rem;
+        }
+
+        .chat-attach-row {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: flex-start;
+            gap: 0.5rem;
+        }
+
+        .chat-add-ref-slot {
+            flex: 0 0 auto;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 0.15rem;
+            min-width: 5.5rem;
+            min-height: 4.25rem;
+            padding: 0.45rem 0.5rem;
+            border: 1.5px dashed color-mix(in oklab, var(--muted) 55%, var(--border));
+            border-radius: var(--radius);
+            background: color-mix(in oklab, var(--surface) 88%, transparent);
+            color: var(--muted);
+            font-family: var(--font-ui);
+            cursor: pointer;
+            transition: border-color 0.15s, color 0.15s, background 0.15s;
+        }
+
+        .chat-add-ref-slot:hover:not(:disabled) {
+            border-color: color-mix(in oklab, var(--fg) 35%, var(--border));
+            color: var(--fg);
+            background: var(--surface);
+        }
+
+        .chat-add-ref-slot:disabled {
+            opacity: 0.45;
+            cursor: not-allowed;
+        }
+
+        .chat-add-ref-slot__icon {
+            font-size: 1.35rem;
+            line-height: 1;
+            font-weight: 300;
+            opacity: 0.85;
+        }
+
+        .chat-add-ref-slot__text {
+            font-size: 0.5625rem;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            font-weight: 600;
+        }
+
+        .chat-add-ref-slot__hint {
+            font-size: 0.5rem;
+            letter-spacing: 0.06em;
+            opacity: 0.75;
+        }
+
+        .chat-ref-chips {
+            flex: 1 1 12rem;
+            min-width: 0;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.35rem 0.5rem;
+            padding: 0.35rem 0.45rem;
+            border-radius: var(--radius);
+            background: color-mix(in oklab, var(--accent) 8%, var(--surface));
+            border: var(--hairline) solid color-mix(in oklab, var(--accent) 22%, var(--border));
+        }
+
+        .chat-ref-chips[hidden] {
+            display: none !important;
+        }
+
+        .chat-ref-kicker {
+            font-size: 0.5rem;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            color: var(--muted);
+            margin-right: 0.15rem;
+        }
+
+        .chat-ref-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.2rem;
+            font-size: 0.625rem;
+            padding: 0.15rem 0.35rem;
+            border-radius: 999px;
+            background: var(--surface);
+            border: var(--hairline) solid var(--border);
+            max-width: 11rem;
+        }
+
+        .chat-ref-chip-role {
+            flex: 0 0 auto;
+            font-size: 0.5rem;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            padding: 0.08rem 0.28rem;
+            border-radius: 999px;
+            background: color-mix(in oklab, var(--accent2) 22%, var(--surface));
+            color: var(--fg);
+            max-width: 2.6rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .chat-ref-chip-id {
+            font-family: var(--font-mono, monospace);
+            font-size: 0.55rem;
+            opacity: 0.75;
+        }
+
+        .chat-ref-chip-x {
+            border: none;
+            background: transparent;
+            color: var(--muted);
+            cursor: pointer;
+            font-size: 0.75rem;
+            line-height: 1;
+            padding: 0 0.1rem;
+        }
+
+        .chat-ref-chip-x:hover {
+            color: var(--fg);
         }
 
         .chat-presets {

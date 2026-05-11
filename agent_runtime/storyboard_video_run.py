@@ -1,9 +1,11 @@
 """
 分镜成片：逐镜 Ark 图生视频 → 本地落盘 → **按分镜时长裁切/垫齐** → ffmpeg 拼接 → 登记视频库。
 
-``storyboard.json`` 里各镜 ``timecode.duration_sec`` 之和（经流水线锁为所选片长）即为目标总长；
-下载的每段云端视频会先经 ``_ffmpeg_normalize_clip_to_duration`` 变为**精确**该秒数再拼接，
-避免「选 20s 但每段被模型拉成 5s」导致成片 30s+。需本机 ``ffmpeg`` / ``ffprobe`` 可用。
+``storyboard.json`` 里各镜 ``timecode.duration_sec`` 为**时间轴目标**。主流水线已按 ``ARK_VIDEO_MODEL``
+单段最短时长合并镜头并分配时长（见 ``demo/storyboard_pipeline`` 的 ``merge_shots_for_ark_duration_floor``），
+故时间轴与方舟 ``duration`` 通常一致；若人工把某镜改短于下限，仍用 ``ark_duration`` 请求方舟并用
+``_ffmpeg_normalize_clip_to_duration`` 裁回分镜秒数兜底。
+需本机 ``ffmpeg`` / ``ffprobe`` 可用。
 """
 
 from __future__ import annotations
@@ -30,7 +32,11 @@ from storyboard_pipeline import build_video_prompt, fill_generated_prompts  # no
 from data.db import insert_project_asset  # noqa: E402
 from data.media_mirror import ensure_project_media_dir, mirror_http_url_to_local  # noqa: E402
 from tool.generation_tools import LocalWanArkHub, run_generate_video  # noqa: E402
-from tool.ai import MediaGenerationRequestClient, clamp_ark_video_duration_seconds  # noqa: E402
+from tool.ai import (  # noqa: E402
+    MediaGenerationRequestClient,
+    clamp_ark_video_duration_seconds,
+    normalize_ark_video_model_id,
+)
 
 _MEDIA_ROOT = _ROOT / "data" / "media"
 
@@ -62,8 +68,18 @@ def _coerce_clip_duration_sec(raw: Any) -> int:
         d = int(round(float(raw)))
     except (TypeError, ValueError):
         d = 5
-    mid = os.environ.get("ARK_VIDEO_MODEL", "").strip() or "doubao-seedance-1-5-pro-251215"
+    mid = normalize_ark_video_model_id(
+        os.environ.get("ARK_VIDEO_MODEL", "").strip() or "doubao-seedance-1-5-pro-251215"
+    )
     return clamp_ark_video_duration_seconds(d, mid)
+
+
+def _timeline_clip_duration_sec(raw: Any) -> int:
+    """分镜时间轴上的目标时长（秒），用于 ffmpeg 裁切/垫片，不向方舟抬最小值。"""
+    try:
+        return max(1, int(round(float(raw))))
+    except (TypeError, ValueError):
+        return 5
 
 
 def _ffprobe_duration_sec(path: Path) -> float | None:
@@ -404,7 +420,8 @@ def run_storyboard_video_for_project(
         vprompt = (gp.get("video_prompt") or "").strip() or build_video_prompt(shot)
         tc = shot.get("timecode") or {}
         dur_raw = tc.get("duration_sec", 5)
-        duration_sec = _coerce_clip_duration_sec(dur_raw)
+        timeline_sec = _timeline_clip_duration_sec(dur_raw)
+        ark_duration_sec = _coerce_clip_duration_sec(dur_raw)
 
         mv = (shot.get("movement") or {}).get("type", "固定")
         mv_s = str(mv or "固定").strip()
@@ -414,7 +431,10 @@ def run_storyboard_video_for_project(
             {
                 "type": "step",
                 "id": "shot_video",
-                "label": f"图生视频 {i + 1}/{len(shots)} · {sid}（约 {duration_sec}s）",
+                "label": (
+                    f"图生视频 {i + 1}/{len(shots)} · {sid}"
+                    f"（分镜 {timeline_sec}s / 方舟 {ark_duration_sec}s）"
+                ),
                 "shot_id": sid,
                 "index": i + 1,
                 "total": len(shots),
@@ -426,10 +446,11 @@ def run_storyboard_video_for_project(
             session,
             vprompt,
             source_image=img_u,
-            duration=duration_sec,
+            duration=ark_duration_sec,
             camera_move=camera_en,
             video_title=f"sb_{rid}_{sid}",
             wait_timeout_seconds=timeout,
+            submit_video_kwargs={"ratio": "9:16"},
         )
         out = json.loads(payload)
         st = str(out.get("status") or "")
@@ -451,7 +472,7 @@ def run_storyboard_video_for_project(
             raise RuntimeError(f"镜头 {sid} 视频落盘失败")
 
         norm_file = clip_file.with_name(f"{clip_file.stem}_norm.mp4")
-        _ffmpeg_normalize_clip_to_duration(clip_file, norm_file, duration_sec)
+        _ffmpeg_normalize_clip_to_duration(clip_file, norm_file, timeline_sec)
         clip_paths.append(norm_file)
 
         rel = f"/media/{media_seg}/storyboard_runs/{rid}/video_clips/{norm_file.name}"
@@ -476,6 +497,10 @@ def run_storyboard_video_for_project(
     final_uri = f"/media/{media_seg}/storyboard_runs/{rid}/{final_name}"
 
     expected_total = sum(
+        _timeline_clip_duration_sec((s.get("timecode") or {}).get("duration_sec", 5))
+        for s in shots
+    )
+    ark_requested_total = sum(
         _coerce_clip_duration_sec((s.get("timecode") or {}).get("duration_sec", 5))
         for s in shots
     )
@@ -490,6 +515,7 @@ def run_storyboard_video_for_project(
         "assembled_uri": final_uri,
         "shot_count": len(shots),
         "expected_total_duration_sec": expected_total,
+        "ark_duration_sum_sec": ark_requested_total,
         "assembled_duration_sec": round(assembled_probe, 2)
         if assembled_probe is not None
         else None,

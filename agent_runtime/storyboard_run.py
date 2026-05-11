@@ -50,6 +50,12 @@ def _storyboard_image_provider() -> str:
     )
 
 
+def default_storyboard_frame_size() -> str:
+    """竖屏分镜 9:16，可用 ``STORYBOARD_FRAME_SIZE`` 覆盖（如 ``1080*1920``）。"""
+    v = os.getenv("STORYBOARD_FRAME_SIZE", "").strip()
+    return v if v else "1080*1920"
+
+
 def normalize_shot_frame_urls(
     shots: list[dict[str, Any]],
     media_seg: str,
@@ -80,7 +86,7 @@ def run_storyboard_for_project(
     generate_shot_images: bool = True,
     write_prompt_preview: bool = True,
     wan_model: str | None = None,
-    wan_size: str = "2K",
+    wan_size: str | None = None,
     product_ref_index: Optional[int] = None,
     callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
@@ -188,6 +194,7 @@ def run_storyboard_for_project(
                 }
             )
 
+        frame_px = (wan_size or "").strip() or default_storyboard_frame_size()
         if prov == "wan":
             wm = (wan_model or "").strip() or "wan2.7-image-pro"
             fill_storyboard_shots_with_wan(
@@ -197,7 +204,7 @@ def run_storyboard_for_project(
                 frames_rel_dir,
                 character_reference_image_path=char_ref,
                 model=wm,
-                size=wan_size,
+                size=frame_px,
                 watermark=False,
                 on_shot_done=on_shot_done,
             )
@@ -212,7 +219,7 @@ def run_storyboard_for_project(
                 frames_rel_dir,
                 character_reference_image_path=char_ref,
                 model=sm,
-                size=wan_size,
+                size=frame_px,
                 watermark=False,
                 on_shot_done=on_shot_done,
             )
@@ -224,6 +231,7 @@ def run_storyboard_for_project(
         "blueprint": result.blueprint,
         "scene_scripts": result.scene_scripts,
         "shots": shots,
+        "timeline_merge_info": getattr(result, "timeline_merge_info", None) or {},
     }
     json_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),

@@ -224,6 +224,33 @@ def extract_wan_image_urls_from_response(raw: Any) -> list[str]:
     return list(dict.fromkeys(extracted))
 
 
+def normalize_ark_video_model_id(model_id: str) -> str:
+    """
+    控制台/文档里常见简写 ``doubao-seedance-1-5-pro`` 与可开通图生视频的完整 endpoint ID 不一致，
+    易导致路由成仅文生或报 ``r2v`` 相关错误。统一映射到官方示例中的完整模型 ID。
+    """
+    m = (model_id or "").strip()
+    while m.startswith("\ufeff"):
+        m = m[1:].strip()
+    if not m:
+        return m
+    low = m.lower()
+    # 仅「无版本后缀」的简写映射到控制台常用可 I2V 的 endpoint id
+    if low == "doubao-seedance-1-5-pro":
+        return "doubao-seedance-1-5-pro-251215"
+    return m
+
+
+def ark_seedance_15_pro_multi_ref_r2v_risk(model_id: str) -> bool:
+    """
+    方舟在多张 ``image_url``（均为 reference_image）时会走 ``task_type=r2v``；
+    Seedance 1.5 Pro 常见报错为 ``r2v does not support model doubao-seedance-1-5-pro``。
+    单首帧 + ``first_frame`` 一般走单图 I2V，稳定得多。
+    """
+    ml = (model_id or "").lower()
+    return "seedance-1-5" in ml and "pro" in ml
+
+
 def clamp_ark_video_duration_seconds(duration: int, model_id: str) -> int:
     """
     火山方舟 CreateContentsGenerationsTasks 对 ``duration`` 强校验（整数秒）。
@@ -287,12 +314,14 @@ class MediaGenerationRequestClient:
                     "ARK_BASE_URL",
                     "https://ark.cn-beijing.volces.com/api/v3",
                 ).strip(),
-                model_id=os.getenv(
-                    "ARK_VIDEO_MODEL",
-                    "doubao-seedance-1-5-pro-251215",
-                ).strip(),
+                model_id=normalize_ark_video_model_id(
+                    os.getenv(
+                        "ARK_VIDEO_MODEL",
+                        "doubao-seedance-1-5-pro-251215",
+                    ).strip()
+                ),
                 resolution=os.getenv("ARK_VIDEO_RESOLUTION", "").strip(),
-                ratio_default=os.getenv("ARK_VIDEO_RATIO", "adaptive").strip(),
+                ratio_default=os.getenv("ARK_VIDEO_RATIO", "9:16").strip(),
                 default_generate_audio=_env_bool("ARK_VIDEO_GENERATE_AUDIO", True),
                 default_watermark=_env_bool("ARK_VIDEO_WATERMARK", False),
             ),
@@ -346,6 +375,7 @@ class MediaGenerationRequestClient:
         watermark: bool | None = None,
         generate_audio: bool | None = None,
         media_root: str | os.PathLike[str] | None = None,
+        reference_image_urls: list[str] | None = None,
     ) -> dict[str, Any]:
         if not self._video:
             raise RuntimeError("未配置 ArkVideoApiParams（video=...）")
@@ -360,9 +390,17 @@ class MediaGenerationRequestClient:
             ) from exc
 
         src = normalize_first_frame_url_for_ark(first_frame_url, media_root=media_root)
-        mid = str(self._video.model_id or "").strip()
+        mid = normalize_ark_video_model_id(str(self._video.model_id or "").strip())
         if not mid:
             raise RuntimeError("Ark model_id 为空")
+
+        # 当前多数方舟网关返回：InvalidParameter — role must be specified for image contents。
+        # 故默认**始终**为每张图附加 role；仅当文档/地域明确可不传时设 ARK_VIDEO_IMAGE_URL_USE_ROLE=0。
+        use_image_role = _env_bool("ARK_VIDEO_IMAGE_URL_USE_ROLE", True)
+        role_first = (os.getenv("ARK_VIDEO_ROLE_FIRST_FRAME", "first_frame") or "first_frame").strip()
+        role_ref = (
+            os.getenv("ARK_VIDEO_ROLE_REFERENCE_IMAGE", "reference_image") or "reference_image"
+        ).strip()
 
         request_ratio = ratio if ratio is not None else self._video.ratio_default
         request_watermark = (
@@ -374,10 +412,63 @@ class MediaGenerationRequestClient:
             else bool(generate_audio)
         )
 
-        content: list[dict[str, Any]] = [
-            {"type": "text", "text": prompt},
-            {"type": "image_url", "image_url": {"url": src}},
-        ]
+        append_refs = os.getenv("ARK_VIDEO_APPEND_REFERENCE_IMAGES", "1").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        extra_norms: list[str] = []
+        if append_refs and reference_image_urls:
+            seen_urls: set[str] = {src}
+            cap = int(os.getenv("ARK_VIDEO_MAX_REFERENCE_IMAGES", "3") or "3")
+            cap = max(0, min(8, cap))
+            for raw_ref in reference_image_urls:
+                if len(extra_norms) >= cap:
+                    break
+                ru = (raw_ref or "").strip()
+                if not ru or ru in seen_urls:
+                    continue
+                try:
+                    norm = normalize_first_frame_url_for_ark(ru, media_root=media_root)
+                except Exception:
+                    continue
+                if norm in seen_urls:
+                    continue
+                seen_urls.add(norm)
+                extra_norms.append(norm)
+
+        # 多参考 → 网关常选 r2v；1.5 Pro 在该 task_type 上易 400。默认只发单首帧（prompt 仍可描述多图语义）。
+        if extra_norms and ark_seedance_15_pro_multi_ref_r2v_risk(mid):
+            if not _env_bool("ARK_VIDEO_SEEDANCE15_ALLOW_MULTI_REF", False):
+                n_drop = len(extra_norms)
+                extra_norms = []
+                print(
+                    "[FrameOS] Ark video: Seedance 1.5 Pro — skipping extra reference image(s) in API "
+                    f"({n_drop} omitted) to avoid task_type=r2v. "
+                    "Set ARK_VIDEO_SEEDANCE15_ALLOW_MULTI_REF=1 to force multi-image (may 400).",
+                    flush=True,
+                )
+
+        def _image_part(url: str, role: str) -> dict[str, Any]:
+            part: dict[str, Any] = {
+                "type": "image_url",
+                "image_url": {"url": url},
+            }
+            if use_image_role and role:
+                part["role"] = role
+            return part
+
+        if extra_norms:
+            # 多张：全部为 reference_image（不可与 first_frame 混用，否则 400）
+            content = [{"type": "text", "text": prompt}]
+            for u in [src, *extra_norms]:
+                content.append(_image_part(u, role_ref))
+        else:
+            content = [
+                {"type": "text", "text": prompt},
+                _image_part(src, role_first),
+            ]
         dur_req = int(duration or 5)
         dur_use = clamp_ark_video_duration_seconds(dur_req, mid)
         create_kwargs: dict[str, Any] = {
@@ -387,7 +478,9 @@ class MediaGenerationRequestClient:
             "duration": dur_use,
             "watermark": request_watermark,
         }
-        if any(token in mid for token in ("seedance-1-5", "seedance-2-0")):
+        # 与 clamp_ark_video_duration_seconds 一致：2.x 模型 ID 常为 seedance-2-pro…（不含字面量 seedance-2-0），
+        # 若此处过窄则不会传 generate_audio，成片无对白/环境声。
+        if "seedance-1-5" in mid or "seedance-2" in mid:
             create_kwargs["generate_audio"] = request_audio
         res = str(self._video.resolution or "").strip()
         if res:
@@ -395,12 +488,51 @@ class MediaGenerationRequestClient:
 
         client = Ark(base_url=self._video.api_base, api_key=self._video.api_key)
 
+        ref_fallback = os.getenv("ARK_VIDEO_REF_FALLBACK", "1").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+        def _create() -> Any:
+            return _to_plain(client.content_generation.tasks.create(**create_kwargs))
+
         with _without_proxy_env():
-            raw = _run_with_retries(
-                lambda: _to_plain(client.content_generation.tasks.create(**create_kwargs)),
-                attempts=4,
-                base_sleep_seconds=1.4,
-            )
+            try:
+                raw = _run_with_retries(
+                    _create,
+                    attempts=4,
+                    base_sleep_seconds=1.4,
+                )
+            except Exception as first_exc:
+                c_list = create_kwargs.get("content")
+                if (
+                    not ref_fallback
+                    or not isinstance(c_list, list)
+                    or len(c_list) <= 2
+                ):
+                    raise
+                # 勿用 c_list[:2]：多图时首图曾标为 reference_image；单图 I2V 须 first_frame。
+                # 网关要求 image 必带 role，回退路径始终写 role（不跟 ARK_VIDEO_IMAGE_URL_USE_ROLE 关闭）。
+                create_kwargs["content"] = [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": src},
+                        "role": role_first,
+                    },
+                ]
+                raw = _run_with_retries(
+                    _create,
+                    attempts=4,
+                    base_sleep_seconds=1.4,
+                )
+                print(
+                    "[FrameOS] Ark video: multi-image create failed, retried with first frame only. "
+                    f"First error: {first_exc!r}"[:2000],
+                    flush=True,
+                )
         if not isinstance(raw, dict):
             raise RuntimeError(f"Ark create returned non-dict: {type(raw)}")
         return raw
@@ -428,7 +560,9 @@ class MediaGenerationRequestClient:
 
 __all__ = [
     "ArkVideoApiParams",
+    "ark_seedance_15_pro_multi_ref_r2v_risk",
     "clamp_ark_video_duration_seconds",
+    "normalize_ark_video_model_id",
     "DashScopeWanApiParams",
     "MediaGenerationRequestClient",
     "extract_wan_image_urls_from_response",

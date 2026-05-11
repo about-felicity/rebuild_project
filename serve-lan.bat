@@ -8,4 +8,7 @@ echo.
 echo 若其它电脑打不开，请在 Windows「防火墙」里允许入站 TCP 8000，或以管理员运行:
 echo   netsh advfirewall firewall add rule name="FrameOS 8000" dir=in action=allow protocol=TCP localport=8000
 echo.
-".venv\Scripts\uvicorn.exe" main:app --host 0.0.0.0 --port 8000 --reload
+echo [提示] 热重载会监视文件变化；data 目录下 app.db 等常变会触发不停重启，导致 /app/ 打不开。
+echo       已对热重载排除整个 data 目录。若仍异常请改用 serve-stable.bat（无 --reload）。
+echo.
+".venv\Scripts\uvicorn.exe" main:app --host 0.0.0.0 --port 8000 --reload --reload-exclude "data"

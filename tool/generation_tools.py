@@ -37,6 +37,8 @@ from seedream_client import (
     SeedreamImageClient,
     collect_result_image_urls,
     coerce_seedream_size,
+    ensure_seedream_multi_ref_pixel_floor,
+    parse_seedream_wxh,
 )
 
 # —— destination → provider asset category (strings your hub understands) ——
@@ -217,7 +219,8 @@ def _dashscope_wan_size_string(model_id: str, size: str, has_images: bool) -> st
         "4K": "4K",
         "1:1": "2K",
         "16:9": "2K",
-        "9:16": "2K",
+        # 竖屏分镜：显式像素；须 ≥ 方舟多参考常见下限（见 seedream_client.ensure_seedream_multi_ref_pixel_floor）
+        "9:16": "1476*2624",
         "4:3": "2K",
         "3:4": "2K",
     }
@@ -227,6 +230,14 @@ def _dashscope_wan_size_string(model_id: str, size: str, has_images: bool) -> st
     if "wan2.7-image" in mid and "pro" not in mid and band == "4K":
         band = "2K"
     return band
+
+
+def _api_image_size_for_aspect(aspect_ratio: str, size: str) -> str:
+    """分镜/竖屏：9:16 落成显式 ``1476*2624``（满足 Seedream 多参考像素下限）；其它画幅沿用 ``size``。"""
+    ar = (aspect_ratio or "").strip().lower().replace(" ", "")
+    if ar in ("9:16", "9x16"):
+        return "1476*2624"
+    return (size or "2K").strip() or "2K"
 
 
 def _wan_hub_parameters(model_id: str, size: str, n: int, has_images: bool) -> dict[str, Any]:
@@ -423,6 +434,11 @@ class LocalWanArkHub:
         imgs = _seedream_build_image_field(input_images, self._media_root)
         client = SeedreamImageClient.from_environ()
         size_s = coerce_seedream_size(size)
+        if isinstance(imgs, list) and len(imgs) >= 2:
+            if parse_seedream_wxh(size_s) is None:
+                # 「2K」等别名在多参考下可能被 Ark 解析为不满足像素下限，改用与 9:16 兼容的显式像素
+                size_s = coerce_seedream_size("1476*2624")
+            size_s = ensure_seedream_multi_ref_pixel_floor(size_s)
         n_req = min(max(int(n), 1), 15)
         wm = _hub_env_bool(
             "ARK_IMAGE_WATERMARK",
@@ -506,6 +522,7 @@ class LocalWanArkHub:
         watermark: bool | None = None,
         camera_move: str | None = None,
         title: str = "Generated Video",
+        reference_image_urls: list[str] | None = None,
     ) -> EphemeralMediaTask:
         if not self._client._video:
             raise RuntimeError("MediaGenerationRequestClient 未配置 video (ArkVideoApiParams)")
@@ -517,6 +534,7 @@ class LocalWanArkHub:
             watermark=watermark,
             generate_audio=generate_audio,
             media_root=self._media_root,
+            reference_image_urls=reference_image_urls,
         )
         provider_id = str(raw.get("id") or raw.get("task_id") or "").strip()
         if not provider_id:
@@ -535,6 +553,7 @@ class LocalWanArkHub:
                 "session": session,
                 "prompt": prompt,
                 "first_frame_url": first_frame_url,
+                "reference_image_urls": reference_image_urls or [],
                 "duration": duration,
                 "title": title,
                 "camera_move": camera_move,
@@ -608,7 +627,7 @@ def tool_generate_image(
     shot_brief: str = "",
     ref_assets: list | None = None,
     input_images: list | None = None,
-    aspect_ratio: str = "16:9",
+    aspect_ratio: str = "9:16",
     n: int = 1,
     *,
     session: Any | None = None,
@@ -652,11 +671,12 @@ def tool_generate_video(
     camera_move: str = "static",
     extra_negative_zh: list[str] | None = None,
     video_title: str = "",
+    reference_image_urls: list[str] | None = None,
     *,
     session: Any | None = None,
     layered_video_prompt: LayeredVideoPromptFn | None = None,
     submit_video_kwargs: Mapping[str, Any] | None = None,
-    wait_timeout_seconds: int = 120,
+    wait_timeout_seconds: int = 240,
     client: MediaGenerationRequestClient | None = None,
     media_root: str | None = None,
 ) -> str:
@@ -676,6 +696,7 @@ def tool_generate_video(
         camera_move=camera_move,
         extra_negative_zh=extra_negative_zh,
         video_title=video_title,
+        reference_image_urls=reference_image_urls,
         layered_video_prompt=layered_video_prompt,
         submit_video_kwargs=submit_video_kwargs,
         wait_timeout_seconds=wait_timeout_seconds,
@@ -787,6 +808,14 @@ def _assemble_prompt_from_intent(
     else:
         base = q
 
+    if destination == "storyboard_library" and has_ref:
+        base = (
+            f"{base}\n"
+            "If any product or package appears in-frame: keep it tack-sharp; reproduce every logo, ingredient line, "
+            "and printed copy with full legibility, pixel-faithful to the product reference (no blurry, smeared, "
+            "or invented glyphs)."
+        )
+
     if sh:
         base = f"{base} Style: {sh}."
 
@@ -872,8 +901,26 @@ def _lite_layered_image_prompt(destination: str, base_prompt: str) -> str:
         anchor += (
             " Authentic product packaging shot, readable labels without warping, believable reflections."
         )
-    neg_zh = "模糊，变形，多余手指，水印，字幕，低分辨率。"
-    neg_en = "blur, distortion, extra fingers, watermark, subtitles, low resolution"
+    elif destination == "storyboard_library":
+        anchor += (
+            " Storyboard keyframe: any featured product must be critically sharp with high micro-contrast; "
+            "packaging text, logos, ingredients, and fine print must stay crisp and fully legible, faithfully "
+            "matching the reference product (no gibberish, missing strokes, or warped glyphs). "
+            "Compose depth-of-field so labels stay readable; avoid motion blur or smear on the pack."
+        )
+
+    if destination == "storyboard_library":
+        neg_zh = (
+            "模糊，变形，多余手指，水印，花哨外挂字幕或卡拉OK歌词条，低分辨率，"
+            "产品包装字迹糊、错字、乱码、拉伸变形。"
+        )
+        neg_en = (
+            "blur, distortion, extra fingers, watermark, flashy karaoke captions or subtitle banners, low resolution, "
+            "illegible or gibberish packaging text, stretched/warped product typography"
+        )
+    else:
+        neg_zh = "模糊，变形，多余手指，水印，字幕，低分辨率。"
+        neg_en = "blur, distortion, extra fingers, watermark, subtitles, low resolution"
     body = (base_prompt or "").strip()
     return (
         f"[Physics anchor]\n{anchor}\n\n"
@@ -886,7 +933,12 @@ def _lite_layered_image_prompt(destination: str, base_prompt: str) -> str:
 def _lite_layered_video_prompt(
     base_prompt: str, extra_negative_zh: list[str] | None
 ) -> str:
-    anchor = "Smooth natural motion, physically plausible movement, stable subject identity."
+    anchor = (
+        "Smooth natural motion, physically plausible movement, stable subject identity. "
+        "Include believable ambient and scene-appropriate sound "
+        "(wind, room tone, footsteps, cloth, subtle dialogue if the scene implies speech); "
+        "avoid a totally silent clip unless silence is explicitly part of the scene."
+    )
     zh_parts = ["抖动过大，画面撕裂，手指数量错误，水印，字幕。"]
     if extra_negative_zh:
         for item in extra_negative_zh:
@@ -944,7 +996,7 @@ def run_generate_image(
     shot_brief: str = "",
     ref_assets: list | None = None,
     input_images: list | None = None,
-    aspect_ratio: str = "16:9",
+    aspect_ratio: str = "9:16",
     n: int = 1,
     *,
     layered_image_prompt: LayeredImagePromptFn | None = None,
@@ -976,6 +1028,7 @@ def run_generate_image(
         destination=destination,
     )
     image_n = _coerce_tool_image_n(n, cap)
+    api_size = _api_image_size_for_aspect(aspect_ratio, size)
 
     task = model_hub.submit_image_generation(
         **_merge_hub_kwargs(
@@ -987,7 +1040,7 @@ def run_generate_image(
             destination=destination,
             input_images=input_images or [],
             n=image_n,
-            size=size,
+            size=api_size,
         )
     )
     task = wait_media_task(model_hub, task)
@@ -1012,6 +1065,22 @@ def run_generate_image(
     )
 
 
+def _dedupe_video_reference_urls(
+    source_image: str, raw_refs: list[str] | None
+) -> list[str]:
+    """与首帧去重后的附加参考图（/media 或 https）。"""
+    src = (source_image or "").strip()
+    seen: set[str] = {src} if src else set()
+    out: list[str] = []
+    for u in raw_refs or []:
+        s = (u or "").strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
+
+
 def run_generate_video(
     model_hub: Any,
     session: Any,
@@ -1021,10 +1090,11 @@ def run_generate_video(
     camera_move: str = "static",
     extra_negative_zh: list[str] | None = None,
     video_title: str = "",
+    reference_image_urls: list[str] | None = None,
     *,
     layered_video_prompt: LayeredVideoPromptFn | None = None,
     submit_video_kwargs: Mapping[str, Any] | None = None,
-    wait_timeout_seconds: int = 120,
+    wait_timeout_seconds: int = 240,
 ) -> str:
     try:
         duration_seconds = int(duration) if duration is not None else 0
@@ -1052,11 +1122,30 @@ def run_generate_video(
             ensure_ascii=False,
         )
 
+    ref_urls = _dedupe_video_reference_urls(src, reference_image_urls)
+    prompt_body = (prompt or "").strip()
+    neg_extra = list(extra_negative_zh or [])
+    if ref_urls:
+        prompt_body = (
+            "[Ark multi-image] Multiple image_url blocks are sent in order after this text (official-style "
+            "payload without per-image role). In Chinese prompts, cite them as 「图片1」「图片2」in the same order "
+            "— 图片1 = first image / primary composition anchor; 图片2+ = strict product packaging / secondary identity. "
+            "Replicate bottle shape, labels, colors, and face from those references; "
+            "never substitute a generic shampoo SKU.\n\n"
+            + prompt_body
+        )
+        neg_extra.append("产品与参考图不一致，擅自替换为其它包装或通用瓶罐")
     fmt = layered_video_prompt or _lite_layered_video_prompt
-    full_prompt = fmt((prompt or "").strip(), extra_negative_zh)
+    full_prompt = fmt(prompt_body, neg_extra or None)
     if camera_move:
         full_prompt = f"{full_prompt}\n运镜: {camera_move}"
     clip_title = _derive_video_title(video_title, prompt)
+
+    vid_kw = dict(submit_video_kwargs or {})
+    if "ratio" not in vid_kw:
+        r = os.getenv("ARK_VIDEO_RATIO", "9:16").strip()
+        if r:
+            vid_kw["ratio"] = r
 
     last_exc: Exception | None = None
     task = None
@@ -1064,13 +1153,14 @@ def run_generate_video(
         try:
             task = model_hub.submit_video_generation(
                 **_merge_hub_kwargs(
-                    submit_video_kwargs,
+                    vid_kw,
                     session=session,
                     prompt=full_prompt,
                     first_frame_url=src,
                     duration=duration_seconds,
                     camera_move=camera_move,
                     title=clip_title,
+                    reference_image_urls=ref_urls or None,
                 )
             )
             task = wait_media_task(
@@ -1095,6 +1185,9 @@ def run_generate_video(
             "status": getattr(task, "status", None),
             "created_asset_ids": out.get("created_asset_ids", []),
             "error_message": getattr(task, "error_message", None),
+            # 供前端 / 入库 meta 追溯：方舟实际收到的首帧与参考列表（Seedance 1.5 Pro 可能在网关侧省略多参考）
+            "source_image_used": src,
+            "reference_image_urls_requested": ref_urls,
         },
         ensure_ascii=False,
     )

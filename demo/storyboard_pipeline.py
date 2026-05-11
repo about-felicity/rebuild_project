@@ -7,7 +7,8 @@
 
 **片长**：用户在 ``PipelineInput.target_duration_sec`` 选的秒数 = 各镜 ``timecode.duration_sec`` 之和（见 ``normalize_shot_timeline_to_target``）；
 在总长锁死的前提下，各镜秒数按模型给出的相对时长（或单镜 ``duration_weight``）**加权**分配，重要/长动作镜可更长。
-分镜图数量 N 由 ``calc_shot_budget`` 按片长自动估算（约每 3.5 秒 1 镜，4≤N≤45）。
+分镜图数量 N 由 ``calc_shot_budget`` 按片长与 **当前 ``ARK_VIDEO_MODEL`` 单段最短时长** 共同约束（约每 3.5 秒 1 镜，且须满足 ``N × 单镜下限 ≤ 片长``；默认 2≤N≤45）。
+若初稿镜数过密，``merge_shots_for_ark_duration_floor`` 会合并相邻镜，使每镜规划时长不低于方舟下限，避免成片阶段裁掉已生成内容。
 
 一步出分镜图：run_storyboard_one_stop(..., generate_shot_images=True) 调用万相（见 wan_image_client.py，需 DASHSCOPE_API_KEY）。
 
@@ -15,7 +16,9 @@
     pip install anthropic
     分镜出图：pip install dashscope>=1.25.15
 
-（Pillow 可选，本模块读图仅用标准库 base64）
+Step 0 调 Anthropic Vision 时：大图会先 **缩边长 + 转 JPEG** 再 base64，减轻上游网关 ``413 Request Entity Too Large``。
+环境变量：``STORYBOARD_VISION_MAX_SIDE``（默认 2048）、``STORYBOARD_VISION_JPEG_QUALITY``（默认 88）。
+无 Pillow 时回退为原图直读（大文件易 413）。
 """
 
 from __future__ import annotations
@@ -27,11 +30,18 @@ import io
 import json
 import os
 import re
+import sys
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
 import anthropic
+
+_TOOL_DIR = Path(__file__).resolve().parent.parent / "tool"
+if _TOOL_DIR.is_dir() and str(_TOOL_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOL_DIR))
+from ai import clamp_ark_video_duration_seconds, normalize_ark_video_model_id  # noqa: E402
 
 # ──────────────────────────────────────────
 # 数据结构
@@ -55,6 +65,7 @@ class PipelineResult:
     scene_scripts: list[dict[str, Any]]
     shots: list[dict[str, Any]]  # 最终分镜JSON数组
     character_visual: dict[str, Any] = field(default_factory=dict)
+    timeline_merge_info: dict[str, Any] = field(default_factory=dict)
 
 
 # ──────────────────────────────────────────
@@ -62,8 +73,24 @@ class PipelineResult:
 # ──────────────────────────────────────────
 
 
-def load_image_base64(path: str) -> dict[str, Any]:
-    """读取本地图片，返回 Anthropic API content block"""
+def _vision_image_max_side() -> int:
+    try:
+        v = int(os.getenv("STORYBOARD_VISION_MAX_SIDE", "2048").strip())
+        return max(512, min(8192, v))
+    except ValueError:
+        return 2048
+
+
+def _vision_jpeg_quality() -> int:
+    try:
+        v = int(os.getenv("STORYBOARD_VISION_JPEG_QUALITY", "88").strip())
+        return max(65, min(95, v))
+    except ValueError:
+        return 88
+
+
+def _load_image_base64_raw(path: str) -> dict[str, Any]:
+    """原图直读（仅作无 Pillow 时的回退）。"""
     p = Path(path)
     suffix = p.suffix.lower()
     media_type_map = {
@@ -76,6 +103,51 @@ def load_image_base64(path: str) -> dict[str, Any]:
     media_type = media_type_map.get(suffix, "image/jpeg")
     data = base64.standard_b64encode(p.read_bytes()).decode("utf-8")
     return {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}}
+
+
+def load_image_base64(path: str) -> dict[str, Any]:
+    """
+    读取本地图片，返回 Anthropic Messages ``image`` content block。
+
+    有 Pillow 时：先按最长边缩至 ``STORYBOARD_VISION_MAX_SIDE``（默认 2048），再编码为 JPEG，
+    避免 Step 0 多张大原图导致反代 ``413 Request Entity Too Large``。
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return _load_image_base64_raw(path)
+
+    max_side = _vision_image_max_side()
+    quality = _vision_jpeg_quality()
+    p = Path(path)
+    try:
+        raw = p.read_bytes()
+        buf = io.BytesIO()
+        with Image.open(io.BytesIO(raw)) as im:
+            if im.mode == "P":
+                im = im.convert("RGBA")
+            if im.mode in ("RGBA", "LA"):
+                bg = Image.new("RGB", im.size, (255, 255, 255))
+                bg.paste(im, mask=im.getchannel("A"))
+                im = bg
+            else:
+                im = im.convert("RGB")
+            w, h = im.size
+            m = max(w, h)
+            if m > max_side:
+                scale = max_side / float(m)
+                nw = max(1, int(round(w * scale)))
+                nh = max(1, int(round(h * scale)))
+                resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
+                im = im.resize((nw, nh), resample)
+            im.save(buf, format="JPEG", quality=quality, optimize=True)
+        data = base64.standard_b64encode(buf.getvalue()).decode("utf-8")
+        return {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/jpeg", "data": data},
+        }
+    except Exception:
+        return _load_image_base64_raw(path)
 
 
 def _first_balanced_json_object(s: str) -> str | None:
@@ -643,17 +715,51 @@ def _normalize_talent_reference_index(result: dict[str, Any], n_img: int) -> Non
             result["talent_appearance"] = str(ta).strip()
 
 
-def calc_shot_budget(target_duration_sec: int) -> int:
+def _storyboard_respect_ark_shot_duration_floor() -> bool:
+    """为 false 时不按方舟单段最短时长收紧镜数 / 合并镜头（仅调试用）。"""
+    v = (os.getenv("STORYBOARD_RESPECT_ARK_MIN_SHOT_SEC", "true") or "true").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def storyboard_ark_video_model_id() -> str:
+    return normalize_ark_video_model_id(
+        (os.getenv("ARK_VIDEO_MODEL", "doubao-seedance-1-5-pro-251215") or "").strip()
+        or "doubao-seedance-1-5-pro-251215"
+    )
+
+
+def storyboard_per_shot_duration_bounds() -> tuple[int, int]:
+    """当前 ``ARK_VIDEO_MODEL`` 下图生视频单段允许的整数秒闭区间 [lo, hi]。"""
+    mid = storyboard_ark_video_model_id()
+    lo = clamp_ark_video_duration_seconds(1, mid)
+    hi = clamp_ark_video_duration_seconds(99, mid)
+    return int(lo), int(hi)
+
+
+def storyboard_timeline_min_shot_sec() -> int:
+    """时间轴规划用的单镜下限（与 ``STORYBOARD_RESPECT_ARK_MIN_SHOT_SEC`` 联动）。"""
+    if not _storyboard_respect_ark_shot_duration_floor():
+        return 2
+    lo, _hi = storyboard_per_shot_duration_bounds()
+    return max(2, int(lo))
+
+
+def calc_shot_budget(target_duration_sec: int, *, min_seconds_per_shot: int = 2) -> int:
     """
     全片分镜条数（= 分镜图张数 / 最终 ``shots`` 长度）。
 
-    按用户选择的**目标片长**估算镜数：约 **每 3.5 秒 1 镜**（四舍五入），
-    夹在 **4～45** 镜之间——至少 4 镜才能满足三幕结构且 ACT2 能排 ≥2 镜；
+    在 ``min_seconds_per_shot``（默认可为 2）约束下：须满足 ``N × min_seconds_per_shot ≤ 片长``，
+    故镜数上限为 ``t // min_seconds_per_shot``；同时按约 **每 3.5 秒 1 镜** 估算叙事密度，
+    二者取较小值。叙事上倾向至少 4 镜（三幕），但若片长不足以支撑 4 镜×下限秒，则降到可行上限。
     流水线末尾 ``normalize_shot_timeline_to_target`` 会把各镜秒数调整为**总和恰好等于目标片长**。
     """
     t = max(1, min(180, int(target_duration_sec)))
-    n = int(round(t / 3.5))
-    return max(4, min(45, n))
+    ms = max(1, int(min_seconds_per_shot))
+    density = max(1, int(round(t / 3.5)))
+    cap_by_floor = max(1, t // ms)
+    n = min(density, cap_by_floor, 45)
+    min_n = min(4, cap_by_floor)
+    return max(min_n, n)
 
 
 def _merge_two_blueprint_scenes(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
@@ -713,14 +819,17 @@ def _distribute_shots_across_scenes(scenes: list[dict[str, Any]], total: int) ->
 
 
 def normalize_blueprint_shot_budget(
-    blueprint: dict[str, Any], *, target_duration_sec: int
+    blueprint: dict[str, Any],
+    *,
+    target_duration_sec: int,
+    min_seconds_per_shot: int = 2,
 ) -> int:
     """
     按片长收紧蓝图：全片分镜总数 = calc_shot_budget；
     若场景过多则合并尾部场景，再按场次时长分配各场 shot_count。
     返回归一化后的全片镜头总数。
     """
-    n = calc_shot_budget(target_duration_sec)
+    n = calc_shot_budget(target_duration_sec, min_seconds_per_shot=min_seconds_per_shot)
     scenes = blueprint.get("scenes")
     if not isinstance(scenes, list):
         return n
@@ -745,22 +854,33 @@ def normalize_blueprint_shot_budget(
     return n
 
 
-def step1_duration_policy(target_duration_sec: int) -> str:
+def step1_duration_policy(
+    target_duration_sec: int, *, min_seconds_per_shot: int = 2
+) -> str:
     """按目标片长说明：镜数 N 由系统公式给出，成片总时长将锁为 t 秒。"""
     t = max(1, min(180, int(target_duration_sec)))
-    n = calc_shot_budget(t)
+    ms = max(1, int(min_seconds_per_shot))
+    n = calc_shot_budget(t, min_seconds_per_shot=ms)
     avg = t / n if n else float(t)
-    lo = max(2, int(round(avg)) - 1)
+    lo = max(ms, int(round(avg)) - 1)
     hi = min(12, int(round(avg)) + 2)
     rec_lo = max(1, (n + 5) // 6)
     rec_hi = min(n, min(12, max(rec_lo, (n + 2) // 3)))
+    n_floor = max(1, min(4, t // ms))
+    ark_line = ""
+    if ms >= 3 and _storyboard_respect_ark_shot_duration_floor():
+        ark_line = (
+            f"\n- **图生视频单镜下限**：当前模型下单段成片规划须 **≥ {ms} 秒**；"
+            f"若 Step3 产出的镜数偏多，流水线会**自动合并相邻镜头**，避免云端已生成内容被裁短浪费。\n"
+        )
     return (
         f"目标总时长 **{t} 秒**（成片时间轴将严格等于此值）。\n"
-        f"- **全片分镜总数 N = {n}**（按片长约 **每 3.5 秒 1 镜**四舍五入，且 **4 ≤ N ≤ 45**；"
+        f"- **全片分镜总数 N = {n}**（约每 3.5 秒 1 镜与「单镜 ≥{ms}s」共同约束；**{n_floor} ≤ N ≤ 45**；"
         f"各场景 **shot_count 之和必须恰好等于 {n}**）。\n"
         f"- **scene_count** 建议 **{rec_lo}～{rec_hi}**，且 **scene_count ≤ N**（每场至少 1 镜）。\n"
         f"- 单镜时长在脚本里会重整为总和 **{t} 秒**，当前可暂按约 **{avg:.1f} 秒/镜**构思（景别上可在 **{lo}～{hi}** 秒间浮动）。\n"
         f"- 三幕结构下 ACT2 须承担产品介入，全片最后一镜须为 packshot/品牌落版意向。"
+        f"{ark_line}"
     )
 
 
@@ -920,7 +1040,8 @@ def expand_screenplay(
         if isinstance(product_desc.get("character_visual"), dict)
         else {}
     )
-    shot_budget = calc_shot_budget(pipeline_input.target_duration_sec)
+    ms = storyboard_timeline_min_shot_sec()
+    shot_budget = calc_shot_budget(pipeline_input.target_duration_sec, min_seconds_per_shot=ms)
 
     user_content = STEP1_USER_TMPL.format(
         description=pipeline_input.description,
@@ -933,7 +1054,9 @@ def expand_screenplay(
         target_duration_sec=pipeline_input.target_duration_sec,
         style=pipeline_input.style,
         fps=pipeline_input.fps,
-        duration_policy=step1_duration_policy(pipeline_input.target_duration_sec),
+        duration_policy=step1_duration_policy(
+            pipeline_input.target_duration_sec, min_seconds_per_shot=ms
+        ),
         shot_budget=shot_budget,
     )
 
@@ -975,7 +1098,9 @@ def expand_screenplay(
     )
 
     n_budget = normalize_blueprint_shot_budget(
-        result, target_duration_sec=pipeline_input.target_duration_sec
+        result,
+        target_duration_sec=pipeline_input.target_duration_sec,
+        min_seconds_per_shot=ms,
     )
     scenes = result.get("scenes") or []
     sum_shots = sum(int(s.get("shot_count") or 0) for s in scenes if isinstance(s, dict))
@@ -1236,6 +1361,129 @@ def _shot_timeline_weight(shot: dict[str, Any]) -> float:
     return 1.0
 
 
+def _merge_two_canonical_shots(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    """合并两条 Step3 产出的 canonical shot；保留左镜为首帧代表，右镜 closing 为段落收束。"""
+    out: dict[str, Any] = deepcopy(left)
+    lid = str(left.get("shot_id") or "").strip()
+    rid = str(right.get("shot_id") or "").strip()
+    out["shot_id"] = f"{lid}+{rid}" if lid and rid else (lid or rid or "merged")
+
+    sd_l = str(left.get("scene_desc") or "").strip()
+    sd_r = str(right.get("scene_desc") or "").strip()
+    if sd_r and sd_r != sd_l:
+        out["scene_desc"] = " / ".join(x for x in (sd_l, sd_r) if x)
+
+    pl = left.get("performance") or {}
+    pr = right.get("performance") or {}
+    la = str(pl.get("action") or "").strip()
+    ra = str(pr.get("action") or "").strip()
+    out.setdefault("performance", {})
+    out["performance"]["action"] = "；接着 ".join(x for x in (la, ra) if x) or ra or la or "."
+    le = str(pl.get("emotion") or "").strip()
+    re = str(pr.get("emotion") or "").strip()
+    out["performance"]["emotion"] = re or le or str(out["performance"].get("emotion") or "")
+
+    laud = left.get("audio") or {}
+    raud = right.get("audio") or {}
+    ldlg = laud.get("dialogue") if isinstance(laud.get("dialogue"), dict) else {}
+    rdlg = raud.get("dialogue") if isinstance(raud.get("dialogue"), dict) else {}
+    ltxt = str(ldlg.get("text") or "").strip()
+    rtxt = str(rdlg.get("text") or "").strip()
+    dlg = " ".join(x for x in (ltxt, rtxt) if x)
+    out.setdefault("audio", {})
+    out["audio"].setdefault("dialogue", {})
+    if dlg:
+        out["audio"]["dialogue"]["text"] = dlg[:500]
+
+    cs_l = left.get("continuity_states") if isinstance(left.get("continuity_states"), dict) else {}
+    cs_r = right.get("continuity_states") if isinstance(right.get("continuity_states"), dict) else {}
+    out.setdefault("continuity_states", {})
+    os_open = cs_l.get("opening_state")
+    out["continuity_states"]["opening_state"] = os_open if isinstance(os_open, dict) else {}
+    cs_close = cs_r.get("closing_state")
+    out["continuity_states"]["closing_state"] = cs_close if isinstance(cs_close, dict) else {}
+    cn_l = str(cs_l.get("continuity_note") or "").strip()
+    cn_r = str(cs_r.get("continuity_note") or "").strip()
+    out["continuity_states"]["continuity_note"] = " | ".join(x for x in (cn_l, cn_r) if x)
+
+    mv_l = str((left.get("movement") or {}).get("type") or "固定").strip()
+    mv_r = str((right.get("movement") or {}).get("type") or "固定").strip()
+    dyn = ("缓推", "跟拍", "横移", "手持", "环绕", "升降", "缓拉")
+    nmv = mv_r if mv_r in dyn and mv_l == "固定" else (mv_l if mv_l in dyn else mv_r)
+    dl = str((left.get("movement") or {}).get("desc") or "").strip()
+    dr = str((right.get("movement") or {}).get("desc") or "").strip()
+    out["movement"] = {
+        "type": nmv,
+        "desc": " ".join(x for x in (dl, dr) if x)[:400],
+    }
+
+    dp_l = str(left.get("director_image_prompt") or "").strip()
+    dp_r = str(right.get("director_image_prompt") or "").strip()
+    out["director_image_prompt"] = " ".join(x for x in (dp_l, dp_r) if x)[:800]
+
+    al: list[Any] = []
+    if isinstance(left.get("alerts"), list):
+        al.extend(left["alerts"])
+    if isinstance(right.get("alerts"), list):
+        al.extend(right["alerts"])
+    al.append(
+        {
+            "level": "info",
+            "code": "TIMELINE_MERGE",
+            "message": f"与镜 {rid} 合并以满足图生视频单段最短时长",
+        }
+    )
+    out["alerts"] = al
+    out["duration_weight"] = _shot_timeline_weight(left) + _shot_timeline_weight(right)
+    return out
+
+
+def merge_shots_for_ark_duration_floor(
+    shots: list[dict[str, Any]],
+    target_duration_sec: int,
+    *,
+    min_per_shot: int | None = None,
+) -> dict[str, Any]:
+    """
+    当 ``len(shots) * min_per_shot > target`` 时，反复合并**相邻**镜中权重和最小的一对，
+    直至可满足「每镜时长可规划为 ≥ min_per_shot 且总和为 target」或仅剩 1 镜。
+    """
+    if not shots:
+        return {"skipped": True, "reason": "no_shots"}
+    t = max(1, min(180, int(target_duration_sec)))
+    if not _storyboard_respect_ark_shot_duration_floor():
+        return {"skipped": True, "reason": "respect_floor_disabled"}
+    lo, hi = storyboard_per_shot_duration_bounds()
+    min_ps = int(min_per_shot) if min_per_shot is not None else int(lo)
+    min_ps = max(int(lo), min(int(min_ps), int(hi)))
+    initial = len(shots)
+    merges: list[dict[str, Any]] = []
+    while len(shots) * min_ps > t and len(shots) > 1:
+        best_i = 0
+        best_score = float("inf")
+        for i in range(len(shots) - 1):
+            s = _shot_timeline_weight(shots[i]) + _shot_timeline_weight(shots[i + 1])
+            if s < best_score:
+                best_score = s
+                best_i = i
+        a = shots[best_i]
+        b = shots[best_i + 1]
+        id_a = str(a.get("shot_id") or "")
+        id_b = str(b.get("shot_id") or "")
+        merged = _merge_two_canonical_shots(a, b)
+        merges.append({"from": [id_a, id_b], "into": str(merged.get("shot_id") or "")})
+        shots[best_i : best_i + 2] = [merged]
+    return {
+        "skipped": False,
+        "min_per_shot_sec": min_ps,
+        "max_per_shot_sec": hi,
+        "target_duration_sec": t,
+        "initial_shot_count": initial,
+        "final_shot_count": len(shots),
+        "merges": merges,
+    }
+
+
 def normalize_shot_timeline_to_target(
     shots: list[dict[str, Any]],
     target_duration_sec: int,
@@ -1256,10 +1504,16 @@ def normalize_shot_timeline_to_target(
     """
     if not shots:
         return
+    min_ps = max(1, int(min_per_shot))
+    max_ps = max(min_ps, int(max_per_shot))
     t = max(1, min(180, int(target_duration_sec)))
     n = len(shots)
-    lo = max(1, min(min_per_shot, t // n))
-    hi = max(max_per_shot, (t + n - 1) // n)
+    if n == 1 and t < min_ps:
+        t = min_ps
+    if min_ps * n > t:
+        min_ps = max(1, t // n)
+    lo = min_ps
+    hi = max(max_ps, (t + n - 1) // n)
 
     weights = [_shot_timeline_weight(s) for s in shots]
     w_sum = sum(weights)
@@ -1900,7 +2154,32 @@ def run_pipeline_with_events(
             }
         )
 
-    normalize_shot_timeline_to_target(all_shots, pipeline_input.target_duration_sec)
+    ms = storyboard_timeline_min_shot_sec()
+    _mx = storyboard_per_shot_duration_bounds()[1]
+    merge_info = merge_shots_for_ark_duration_floor(
+        all_shots,
+        pipeline_input.target_duration_sec,
+        min_per_shot=ms,
+    )
+    if merge_info.get("merges"):
+        emit(
+            {
+                "type": "step_done",
+                "id": "timeline_shot_merge",
+                "label": "已合并相邻镜头以满足图生视频单段最短时长",
+                "detail": json.dumps(merge_info["merges"], ensure_ascii=False)[:2000],
+                "shot_count_before": merge_info.get("initial_shot_count"),
+                "shot_count_after": merge_info.get("final_shot_count"),
+                "min_per_shot_sec": merge_info.get("min_per_shot_sec"),
+            }
+        )
+
+    normalize_shot_timeline_to_target(
+        all_shots,
+        pipeline_input.target_duration_sec,
+        min_per_shot=ms,
+        max_per_shot=_mx,
+    )
 
     emit({"type": "pipeline_done", "shot_count": len(all_shots), "scene_count": len(scene_scripts)})
     cv_out = product_desc.get("character_visual")
@@ -1910,6 +2189,7 @@ def run_pipeline_with_events(
         scene_scripts=scene_scripts,
         shots=all_shots,
         character_visual=dict(cv_out) if isinstance(cv_out, dict) else {},
+        timeline_merge_info=dict(merge_info) if isinstance(merge_info, dict) else {},
     )
 
 
@@ -1954,7 +2234,9 @@ def build_image_prompt(
     char_descs = char_descs or {}
     hint = str(shot.get("director_image_prompt") or "").strip()
 
-    parts: list[str] = []
+    parts: list[str] = [
+        "vertical 9:16 aspect ratio, short-form video framing, portrait orientation",
+    ]
 
     frame = shot.get("frame") or {}
     parts.append(str(frame.get("composition_desc", "") or ""))
@@ -2051,6 +2333,7 @@ def build_video_prompt(shot: dict[str, Any]) -> str:
     mv_extra = str(mv_desc).strip() if mv_desc else ""
 
     parts = [
+        "vertical 9:16 output, portrait video, mobile short-form framing",
         frame.get("composition_desc", ""),
         movement_map.get(movement_type, "static camera"),
         mv_extra,
@@ -2058,6 +2341,10 @@ def build_video_prompt(shot: dict[str, Any]) -> str:
         f"lighting mood: {light.get('mood')}",
         f"duration: {tc.get('duration_sec', 4)} seconds",
         "cinematic, smooth motion, film quality",
+        (
+            "ambient audio matching the scene (environment, subtle foley, dialogue if any); "
+            "avoid a completely silent video"
+        ),
     ]
 
     dialogue = (shot.get("audio") or {}).get("dialogue")
@@ -2470,6 +2757,12 @@ def _validate_frames_subdir(name: str) -> str:
     return s
 
 
+def _default_storyboard_wan_size() -> str:
+    """竖屏 9:16 分镜图；可用环境变量 ``STORYBOARD_FRAME_SIZE`` 覆盖。"""
+    v = os.getenv("STORYBOARD_FRAME_SIZE", "").strip()
+    return v if v else "1080*1920"
+
+
 def run_storyboard_one_stop(
     pipeline_input: PipelineInput,
     json_out: str | Path,
@@ -2478,7 +2771,7 @@ def run_storyboard_one_stop(
     fill_prompts: bool = True,
     generate_shot_images: bool = True,
     wan_model: str = "wan2.7-image-pro",
-    wan_size: str = "2K",
+    wan_size: str | None = None,
     wan_watermark: bool = False,
     product_ref_index: Optional[int] = None,
     frames_subdir: str = "storyboard_frames",
@@ -2523,6 +2816,7 @@ def run_storyboard_one_stop(
             + (f"；人物参考=第 {tidx + 1} 张" if char_path else "")
         )
         frames_abs = json_path.parent.joinpath(*frames_rel.split("/"))
+        sz = (wan_size or "").strip() or _default_storyboard_wan_size()
         fill_storyboard_shots_with_wan(
             shots,
             prod_path,
@@ -2530,7 +2824,7 @@ def run_storyboard_one_stop(
             frames_rel,
             character_reference_image_path=char_path,
             model=wan_model,
-            size=wan_size,
+            size=sz,
             watermark=wan_watermark,
         )
 

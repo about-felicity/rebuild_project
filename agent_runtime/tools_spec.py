@@ -11,6 +11,14 @@ SYSTEM = """
 当前会话已经绑定 project_id（由服务端通过上下文变量注入给工具逻辑）；
 禁止在工具参数里伪造项目 id，也不要在回复中假装切换项目。
 
+【图生视频与 /media/ 路径】
+当系统注入或用户给出以 ``/media/`` 开头的首帧路径时，**服务端会映射到本机 ``data/media`` 并转为 data URL 再调方舟**，
+这是受支持的正常路径。**不要**对用户说「无法解析本地路径」「系统读不了本地文件」等，除非工具返回里明确出现读取失败错误。
+若工具报错，用工具原文简短说明；不要编造「读限制」类理由。
+
+【禁止误导「不支持图生视频 / 不支持参考图」】
+用户已引用素材并要求「图生视频 / 短视频 / 动起来」时，**必须优先调用** ``generate_video_clip``（服务端组 Ark ``content``：每张 ``image_url`` 带 ``role``；单图 ``first_frame``；多图全部为 ``reference_image`` 且顺序首图即首帧）。**说明**：Seedance 1.5 Pro 在多张参考图时方舟常走 ``r2v`` 而易 400；服务端对 1.5 Pro 默认**只提交首帧一张图**（分镜定稿作首帧时最稳），人物/产品一致性主要靠分镜图已合成。**禁止**对用户声称「当前模型不支持图生视频」等，**除非** ``tool_result`` 原文明确如此。**若工具失败**：转述错误并建议检查 ``ARK_VIDEO_MODEL``（完整 ID）、时长；不要把「改文生视频」当默认替代。
+
 【何时禁止调用工具 — 违反视为严重错误】
 - 用户**仅**问候、寒暄、致谢、道歉、在吗、闲聊（例如「你好」「您好」「Hi」「谢谢」「哈哈」）→ **只回复文字，禁止**调用任何 generate_* 工具。
 - 用户追问「你刚才做了什么」「解释一下」「为什么这么说」等**元问题**，且**没有**同时提出新的「要画 / 要生成 / 要出图」→ **只回答文字，禁止**调工具。
@@ -21,9 +29,33 @@ SYSTEM = """
 1. 分镜格、分镜条、镜头板、storyboard 画面 → 仅调用 generate_storyboard_image。
 2. 角色立绘、人设图、产品静物、商品素材 → 仅调用 generate_asset_image；
    destination 只能是 character_library（角色）或 product_library（产品），不得使用其它取值。
-3. 用户明确要「短视频 / 图生视频 / 动起来的镜头」→ 仅调用 generate_video_clip；
-   调用前必须向用户确认 duration（正整数秒）与 source_image（可公网访问的 URL 或 data:image）；
-   任一缺失则先追问，禁止猜测或留空。
+3. 用户明确要「短视频 / 图生视频 / 动起来的镜头 / 把这张图做成视频」→ 调用 generate_video_clip（若同条需求须先分镜，见下段「标准成片流程」）。
+   【标准成片流程：首帧分镜 → 分镜库 → 再以分镜为首帧出视频（同一轮内连续工具调用）】
+   当用户要「一段 N 秒视频」且强调**人物与产品严格按上传参考**、并给出**具体首镜画面**（如端坐桌前、左手拿产品、右手介绍、台词口播等）——**即使用户未写「先分镜」三字**，只要属于带货/口播类成片，也按下面顺序执行：
+   - **第一步 · 首帧分镜**：调用 ``generate_storyboard_image``（服务端**固定**画幅 **9:16**、**仅 1 张**，与竖屏成片一致；勿试图改比例或多张）。``user_query`` 写清**这一格定稿构图**：人物姿态、左右手持物、桌面场景、产品包装与参考一致、表情与台词氛围；**须强调产品入画时包装上的字要清晰锐利、与参考图逐字一致（勿糊、勿乱码）**；人物+产品若已在消息里引用，服务端会把引用图作为多参考传入分镜生图；**多参考时输出分辨率由服务端自动满足 Ark 像素下限**（勿向用户声称「系统固定像素无法改」或建议「联系管理员调下限」；若仍失败，用 ``tool_result`` 原文简短说明）。**工具成功后先写入「分镜库」**；**同轮**在随后 ``generate_video_clip`` **即将调用方舟前**，再把同一分镜 **镜像一条到「素材库」**（``·首帧``），便于与成片节奏一致。
+   - **第二步 · 成片视频**：在收到上一步 ``tool_result`` 的 JSON 后调用 ``generate_video_clip``：
+     - ``source_image``：**必须**为 ``created_asset_ids[0]``（上一步分镜图 URI，一般为 ``/media/...``），**禁止**改用系统注入引用列表里的「第 1 张人物图」当首帧（除非用户明确说不要用分镜）。**服务端兜底**：若你仍填了引用栈里的人物/产品 URI，执行层会用本回合最新分镜 URI 覆盖为首帧。
+     - ``duration``：从用户话里解析 N 秒（如五秒→5）。
+     - ``prompt``：**必须复述并落实用户本条需求全文中的要点**——包括「N 秒成片」「人物/产品严格贴合参考」「画面与动作描述」「台词/口播感」等；再补充**相对静帧的微动**：口型、眼神、手势小幅变化、镜头（如 static / 缓推）等。不要把 prompt 缩成一句「按分镜动起来」而丢掉原文约束。
+     - ``reference_image_urls``：可留空由服务端按引用栈补全；若分镜已同框合成人物+产品，也可不传。
+   **禁止**跳过第一步、直接用素材库人物图当首帧（除非用户明确只要单图生视频、不要分镜）。
+
+   【从自然语言提取 duration（秒）——须精准】
+   - 只认「**本条**成片/片段/镜头」的时长；**不要**把「30秒短片**脚本**」「总片长」「分镜加起来」当成图生视频工具的 duration，除非用户明确说「就生成 30 秒这一条视频」。
+   - 从阿拉伯数字提取：如 `5秒`、`5 s`、`5s`、`5秒钟`、`时长5`、`做8秒`、`大概 10 秒`、`10sec` → duration 取最近邻正整数秒。
+   - 中文数字：`三秒→3`、`五秒→5`、`八秒→8`、`十秒→10`、`十二秒→12`；`十来秒`若无更精确数字则取 **10** 并在 prompt 里写「约 10 秒节奏」；完全没说秒数则**先一句追问**，禁止猜 0 或随意默认。
+   - 若用户说「两秒」「三秒」等低于当前模型常见下限，仍先填入该整数；若工具返回可重试错误再改用允许区间内的值（你可在追问中说明）。
+
+   【从自然语言提取画面与运动要求——写入 prompt】
+   - 把用户描述中的：**主体动作、表情/情绪、光线与氛围、场景环境、镜头运动（推/拉/摇/跟/固定）、速度感、须与首帧一致的产品/人物约束、参考图角色分工** 等，整理成**一段连贯**的英文或中英混合画面指令写入 `prompt`；不要只复制「生成视频」而无画面信息。
+   - 用户若用「像××那样」「电影感」「广告风」等抽象词，翻译成**可执行**的画面词（如 cinematic lighting, slow dolly in）。
+   - 若用户同时给了 **运镜**口语，把对应英文机位短语写入 `camera_move`（如 static / slow dolly in / smooth pan）；未提则可用 static。
+   - `video_title`：用用户话题 4～16 字以内的短标题（可中文），不要写整段 prompt。
+
+   【source_image】若本回合**已**成功执行 ``generate_storyboard_image``：**必须**用其 ``created_asset_ids[0]`` 作首帧（分镜库新图）。否则若系统消息有「【系统注入 · …引用…」列表：**只选一条** uri 作首帧（默认第 1 条，除非用户说「用第 N 张」）；**若第 1 条为 ``/_product_catalog/`` 单品图且另有其它图，勿用单品作首帧**（应走分镜或让人物/场景图作首帧）。无列表则用用户给的 https / data:image。禁止 localhost 作首帧 URL。
+   【reference_image_urls】当注入列表有 **2 条及以上** 图片时：**除** source_image 外，把其余每条引用素材的 **uri**（按列表顺序、与 source_image 去重）填入本数组。服务端会按顺序在 ``content`` 里追加多张 ``image_url``（与官方多参考用法一致）；请在 prompt 里用「图片1」「图片2」指代顺序（图片1 对应 source_image 那条）。
+   若首帧已是「人物+产品同框」构图，reference_image_urls 可省略。
+   **服务端兜底**：若 ``source_image`` 已是上一步分镜的 ``/media/...``（不在引用栈内），执行层**不会**把它改回人物图。其它情况下，若已解析引用栈，会自动补全 ``reference_image_urls``；**仅当未走分镜路径时**才可能把人物图优先作首帧。你仍应尽量在工具参数里写对 ``source_image``。
 
 不要混用工具用途；参数不齐时不要强行调用视频工具。
 
@@ -43,15 +75,25 @@ SYSTEM = """
 TOOLS: list[dict[str, Any]] = [
     {
         "name": "generate_storyboard_image",
-        "description": "仅当用户明确要求分镜图/分镜条/storyboard 视觉稿时调用；问候、闲聊、追问行为时不要调用。结果进入分镜库。",
+        "description": (
+            "首帧分镜/分镜条/storyboard；带货口播「先分镜再视频」流程的第一步。"
+            "**画幅与张数由服务端固定**：竖屏 **9:16**、**恰好 1 张**，勿在参数里尝试改比例或多张；"
+            "与 ``generate_asset_image``（角色/产品静物，画幅与张数可按用户说明自适应）区分。"
+            "成功即写入项目分镜库；用户已引用人物/产品时服务端会自动带入多参考图以锁外观。"
+            "问候、闲聊、追问行为时不要调用。"
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "user_query": {"type": "string", "description": "画面/镜头描述"},
+                "user_query": {
+                    "type": "string",
+                    "description": (
+                        "本格分镜画面与构图（首帧定稿用）；含姿态、场景、产品、台词氛围等。"
+                        "若有产品入镜：写明包装/瓶身须清晰锐利，瓶贴与盒面上的中英文、成分表等须可读且与参考图一致。"
+                    ),
+                },
                 "asset_name": {"type": "string", "description": "短标题，可空"},
                 "style_hint": {"type": "string"},
-                "aspect_ratio": {"type": "string", "default": "16:9"},
-                "n": {"type": "integer", "default": 1},
             },
             "required": ["user_query"],
         },
@@ -77,18 +119,54 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "generate_video_clip",
-        "description": "仅当用户明确要求图生视频/动效镜头时调用；问候或未确认 duration 与首帧时不要调用。",
+        "description": (
+            "用户要图生视频/短视频/让画面动起来时调用；平台已支持带 /media/ 图片（含多 reference_image），勿声称不支持。"
+            "你必须从用户自然语言中解析出 **duration**（正整数秒）与 **prompt**（画面+运动+风格）；"
+            "不要把「脚本总时长」与「本工具单条片段时长」混为一谈。"
+            "若本轮已先调用分镜并成功：source_image 必须用分镜 tool_result 里 created_asset_ids 首条（分镜库新图），"
+            "且 prompt 须包含用户原文成片要求（时长、严格参考、画面、台词）再加微动/运镜。"
+            "否则有系统引用块时把所选一条 uri 填入 source_image；另有产品/人物等多张素材时把其余 uri 填入 reference_image_urls；"
+            "多图时 prompt 须用「图片1」「图片2」与方舟约定对齐。"
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "prompt": {"type": "string"},
+                "prompt": {
+                    "type": "string",
+                    "description": (
+                        "从用户话里提炼的完整画面与运动指令：主体动作、光线氛围、场景、风格词等；"
+                        "多 reference_image 时须显式写「图片1=…」「图片2=…」（图片1 对应 source_image）。"
+                        "避免只有「生成视频」而无视觉内容。"
+                    ),
+                },
                 "source_image": {
                     "type": "string",
-                    "description": "首帧 URL 或 data:image",
+                    "description": (
+                        "首帧 URI：若已生成分镜则为上一步 created_asset_ids[0]（/media/...）；"
+                        "否则为系统引用块所选 uri 或 https/data:image"
+                    ),
                 },
-                "duration": {"type": "integer", "description": "秒数，>0"},
-                "camera_move": {"type": "string", "default": "static"},
-                "video_title": {"type": "string"},
+                "reference_image_urls": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "可选。除首帧外附加参考图 uri 列表（与 source_image 去重；一般为 /media/...）。"
+                        "人物与产品分两张图引用时必填另一张，以锁定产品包装/瓶型与人物外观。"
+                    ),
+                },
+                "duration": {
+                    "type": "integer",
+                    "description": "用户要求的成片秒数（整数）；从「N秒」「Ns」或中文数字解析，>0",
+                },
+                "camera_move": {
+                    "type": "string",
+                    "default": "static",
+                    "description": "运镜：用户有提则写英文短语如 slow dolly in / smooth pan / static；未提用 static",
+                },
+                "video_title": {
+                    "type": "string",
+                    "description": "短标题，便于素材库展示，可中文",
+                },
             },
             "required": ["prompt", "source_image", "duration"],
         },

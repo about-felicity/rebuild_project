@@ -9,6 +9,7 @@
 - ``SEEDREAM_API_KEY``：优先；未设置则用 ``ARK_API_KEY``
 - ``ARK_BASE_URL``：默认 ``https://ark.cn-beijing.volces.com/api/v3``
 - ``STORYBOARD_STRICT_PRODUCT_REF``：默认 ``1``，分镜流水线逐镜出图时强制产品与上传参考图一致；``0``/``false`` 关闭
+- ``SEEDREAM_MULTI_REF_MIN_PIXELS``：多参考图（≥2 张）时 Ark 对 ``size`` 的最低总像素（默认 ``3686400``，即约 ``1440×2560`` 的 9:16）；低于则自动等比放大 ``WxH``。
 
 依赖：``pip install 'volcengine-python-sdk[ark]'``（与 ``tool/ai`` 中 Ark 生视频相同栈）。
 
@@ -20,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import mimetypes
 import os
 import re
@@ -97,8 +99,8 @@ def image_file_to_data_url(path: str | Path) -> str:
 
 
 def coerce_seedream_size(size: str) -> str:
-    """将工具侧 ``2K`` / ``WxH`` 规范为 Seedream ``size`` 字段。"""
-    s = (size or "").strip().replace("×", "x")
+    """将工具侧 ``2K`` / ``WxH`` / ``W*H`` 规范为 Seedream ``size`` 字段。"""
+    s = (size or "").strip().replace("×", "x").replace("*", "x")
     if re.fullmatch(r"(?i)\d+x\d+", s):
         return s.lower()
     u = s.upper().replace(" ", "")
@@ -107,6 +109,53 @@ def coerce_seedream_size(size: str) -> str:
     if u in ("2K", "3K", "4K"):
         return u
     return "2K"
+
+
+def _seedream_multi_ref_min_pixels() -> int:
+    """
+    方舟文档常见下限为 3686400（≈1440×2560）。
+    默认略抬高，避免网关/实现对「恰等于下限」校验过严导致仍 400。
+    """
+    try:
+        v = int(os.getenv("SEEDREAM_MULTI_REF_MIN_PIXELS", "3840000").strip())
+        return max(1_000_000, min(50_000_000, v))
+    except ValueError:
+        return 3_840_000
+
+
+def parse_seedream_wxh(size_s: str) -> tuple[int, int] | None:
+    """若 ``size_s`` 为 ``1234x5678`` 形式则返回 (w, h)，否则 ``None``（如 ``2K``）。"""
+    s = (size_s or "").strip().lower()
+    m = re.fullmatch(r"(\d+)x(\d+)", s)
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
+def ensure_seedream_multi_ref_pixel_floor(size_s: str) -> str:
+    """
+    多参考图时方舟常要求 ``width * height`` 不低于阈值（否则会 ``InvalidParameter``）。
+    对显式 ``WxH``：若像素数不足则**保持宽高比**等比放大到满足下限。
+    非 ``WxH``（如 ``2K``）原样返回，由上游模型解析。
+    """
+    xy = parse_seedream_wxh(size_s)
+    if xy is None:
+        return size_s
+    w, h = xy
+    if w < 1 or h < 1:
+        return size_s
+    min_px = _seedream_multi_ref_min_pixels()
+    if w * h >= min_px:
+        return f"{w}x{h}".lower()
+    factor = math.sqrt(min_px / float(w * h))
+    nw = max(1, int(math.ceil(w * factor)))
+    nh = max(1, int(math.ceil(h * factor)))
+    while nw * nh < min_px:
+        if nw <= nh:
+            nw += 1
+        else:
+            nh += 1
+    return f"{nw}x{nh}"
 
 
 def _safe_shot_filename(shot_id: str) -> str:
@@ -429,6 +478,16 @@ def fill_storyboard_shots_with_seedream(
 
     mid = (model or "").strip() or os.getenv("ARK_IMAGE_MODEL", DEFAULT_ARK_SEEDREAM_MODEL).strip()
     size_s = coerce_seedream_size(size)
+    if char:
+        if parse_seedream_wxh(size_s) is None:
+            size_s = coerce_seedream_size("1476*2624")
+        before = size_s
+        size_s = ensure_seedream_multi_ref_pixel_floor(size_s)
+        if size_s != before:
+            print(
+                f"  [Seedream] 多参考图 Ark 最小像素约束：size {before!r} → {size_s!r}",
+                flush=True,
+            )
     out_fmt = os.getenv("SEEDREAM_OUTPUT_FORMAT", "png").strip() or None
     extra: dict[str, Any] = {}
     if out_fmt:

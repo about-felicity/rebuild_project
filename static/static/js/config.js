@@ -24,6 +24,13 @@ export const CONFIG = {
      * false：联调真实 API；需与后端 CORS / 路径一致，且 `project_id` 会话与后端 SESSIONS 对齐。
      */
     USE_MOCK_API: false,
-    /** 请求超时 ms（Agent 多轮可能较长，联调可改为 120000+） */
+    /** 全局 HTTP 默认超时 ms（非 Agent 的短请求也会用；不宜过小） */
     REQUEST_TIMEOUT_MS: 120000,
+    /** Agent /api/agent/chat 单轮超时（含图生视频任务轮询，须 ≥ 服务端等待） */
+    AGENT_CHAT_TIMEOUT_MS: 300000,
+    /**
+     * 首屏/切换项目时拉会话与素材列表的超时（须明显短于 REQUEST_TIMEOUT_MS），
+     * 避免后端不可达时整页卡在「加载」态两分钟。
+     */
+    BOOTSTRAP_READ_TIMEOUT_MS: 18000,
 };

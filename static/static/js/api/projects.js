@@ -1,11 +1,20 @@
 import { CONFIG } from "../config.js";
 import { apiDelete, apiGet, apiPost, apiRequest } from "./http.js";
 
+const _bootstrapTimeout = () =>
+    Number.isFinite(Number(CONFIG.BOOTSTRAP_READ_TIMEOUT_MS)) &&
+    Number(CONFIG.BOOTSTRAP_READ_TIMEOUT_MS) > 0
+        ? Number(CONFIG.BOOTSTRAP_READ_TIMEOUT_MS)
+        : 18000;
+
 /** GET /api/projects/:id/assets；失败时抛出，由调用方提示（不再静默返回 null 导致永远不合并素材） */
 export async function fetchProjectAssets(projectId, signal) {
     if (CONFIG.USE_MOCK_API) return [];
     const path = `/api/projects/${encodeURIComponent(projectId)}/assets`;
-    const data = await apiGet(path, signal ? { signal } : {});
+    const data = await apiGet(path, {
+        ...(signal ? { signal } : {}),
+        timeoutMs: _bootstrapTimeout(),
+    });
     return Array.isArray(data) ? data : [];
 }
 
@@ -13,7 +22,10 @@ export async function fetchProjectAssets(projectId, signal) {
 export async function fetchStoryboardRuns(projectId, signal) {
     if (CONFIG.USE_MOCK_API) return [];
     const path = `/api/projects/${encodeURIComponent(projectId)}/storyboard/runs`;
-    const data = await apiGet(path, signal ? { signal } : {});
+    const data = await apiGet(path, {
+        ...(signal ? { signal } : {}),
+        timeoutMs: _bootstrapTimeout(),
+    });
     return Array.isArray(data) ? data : [];
 }
 

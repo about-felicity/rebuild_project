@@ -75,7 +75,8 @@ except (TypeError, ValueError):
 # 无画面/无生成意图的寒暄或元问题：本回合不传 tools，避免误调生图/视频工具
 _GENERATION_INTENT = re.compile(
     r"(生[成图动]|画一张|画个|出图|分镜|角色库|产品库|三视图|做多视图|storyboard|"
-    r"做.{0,6}[图画]|视频\s*片段|wan2|生成素材|重新生成|帮我画|给.{0,6}图)",
+    r"做.{0,6}[图画]|视频\s*片段|图生视频|短视频|做成视频|做成短片|动起[来]|动起来|"
+    r"来段视频|生成视频|做个视频|wan2|生成素材|重新生成|帮我画|给.{0,6}图)",
     re.IGNORECASE,
 )
 _PURE_CHITCHAT = re.compile(

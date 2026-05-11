@@ -12,7 +12,12 @@ function buildUrl(path) {
  */
 export async function apiRequest(path, options = {}) {
     const ctrl = new AbortController();
-    const { signal: externalSignal, headers: optHeaders = {}, ...rest } = options;
+    const {
+        signal: externalSignal,
+        headers: optHeaders = {},
+        timeoutMs: timeoutMsOpt,
+        ...rest
+    } = options;
     if (externalSignal) {
         if (externalSignal.aborted) {
             ctrl.abort();
@@ -20,7 +25,11 @@ export async function apiRequest(path, options = {}) {
             externalSignal.addEventListener("abort", () => ctrl.abort(), { once: true });
         }
     }
-    const t = setTimeout(() => ctrl.abort(), CONFIG.REQUEST_TIMEOUT_MS);
+    const cap =
+        Number.isFinite(Number(timeoutMsOpt)) && Number(timeoutMsOpt) > 0
+            ? Number(timeoutMsOpt)
+            : CONFIG.REQUEST_TIMEOUT_MS;
+    const t = setTimeout(() => ctrl.abort(), cap);
     try {
         const headers = { ...optHeaders };
         const method = (rest.method || "GET").toUpperCase();

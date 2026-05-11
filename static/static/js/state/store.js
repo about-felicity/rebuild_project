@@ -14,6 +14,10 @@ export const state = {
     agentThreads: {},
     /** 哪一项目正等待 Agent 回复（用于切回项目时还原「正在输入」） */
     agentTypingProjectId: null,
+    /** Agent 图生视频首帧：来自素材库的图片项 { id, name, url }（当前项目工作副本） */
+    chatReferencedAssets: [],
+    /** 按项目 id 持久化引用列表，切换项目时恢复 */
+    chatRefByProject: {},
     chatMsgs: 0,
     sessionStart: Date.now(),
     jsonData: null,

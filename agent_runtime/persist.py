@@ -9,7 +9,8 @@
 
 **输入 / 输出**
 - ``destination_to_app_library(dest) -> str``：``storyboard_library`` → ``storyboard``，其余合法 destination → ``asset``。
-- ``persist_image_tool_output(..., summary_base=...) -> None``：无返回；展示名 ``{摘要}_{文件主名六位}``。
+- ``persist_image_tool_output(...)``：展示名 ``{摘要}_{文件主名六位}``；分镜库首条入库时返回镜像素材库所需字段，否则 ``None``（镜像在视频开始时写入）。
+- ``insert_storyboard_asset_library_mirror(...)``：视频开始生成时把分镜图写入「素材库」。
 - ``persist_video_tool_output(..., summary_base=...) -> None``：无返回；规则同上。
 """
 
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Any
 from urllib.parse import urlparse
 
 from data.db import insert_project_asset
@@ -51,6 +53,36 @@ def _stem6_from_stored_uri(stored: str) -> str:
     return "file"
 
 
+def insert_storyboard_asset_library_mirror(
+    project_id: str,
+    *,
+    storyboard_library_asset_id: int,
+    stored: str,
+    display_name: str,
+    meta_base: dict,
+) -> int:
+    """分镜已入「分镜库」后，在视频开始生成时写入「素材库」同名图（``·首帧`` 后缀）。"""
+    asset_meta = {
+        **meta_base,
+        "from_agent_storyboard": True,
+        "paired_storyboard_library_asset_id": storyboard_library_asset_id,
+    }
+    aid2 = insert_project_asset(
+        project_id,
+        "asset",
+        "image",
+        f"{display_name} ·首帧",
+        stored,
+        meta=asset_meta,
+    )
+    print(
+        f"[FrameOS] persist image (asset mirror on video start): project_id={project_id!r} "
+        f"asset_id={aid2} uri={stored[:160]!r}",
+        flush=True,
+    )
+    return aid2
+
+
 def destination_to_app_library(destination: str) -> str:
     """generation_tools 的 destination → SQLite ``project_assets.library``（前端的库维度）."""
     if destination == "storyboard_library":
@@ -64,27 +96,29 @@ def persist_image_tool_output(
     result_text: str,
     *,
     summary_base: str = "",
-) -> None:
+) -> dict[str, Any] | None:
     """
     **接受**：``run_generate_image`` 返回的整段字符串（成功为 JSON，失败可能 ``Error: ...``）。
     **写出**：每个 ``created_asset_ids`` 元素一行 ``project_assets``（library/kind/uri/meta）。
     ``summary_base``：优先来自工具 ``asset_name``，否则 ``user_query``，用于展示名 ``{摘要}_{本地文件前6位}``。
+    **返回**：仅当本次写入了「分镜库」首条图时，返回镜像素材库所需字段；否则 ``None``（镜像延后到视频开始时插入）。
     """
     t = result_text.strip()
     if t.startswith("Error:"):
-        return
+        return None
     try:
         data = json.loads(result_text)
     except json.JSONDecodeError:
-        return
+        return None
     if not isinstance(data, dict):
-        return
+        return None
     created = data.get("created_asset_ids") or []
     if not created:
-        return
+        return None
     lib = destination_to_app_library(destination)
     kind = "storyboard" if lib == "storyboard" else "image"
     summary = _sanitize_summary_text(summary_base)
+    storyboard_mirror_pending: dict[str, Any] | None = None
     for item in created:
         uri = str(item).strip()
         local = mirror_http_url_to_local(project_id, uri)
@@ -94,7 +128,7 @@ def persist_image_tool_output(
             meta["remote_uri"] = uri
         stem6 = _stem6_from_stored_uri(stored)
         display_name = f"{summary}_{stem6}"
-        insert_project_asset(
+        aid = insert_project_asset(
             project_id,
             lib,
             kind,
@@ -102,6 +136,19 @@ def persist_image_tool_output(
             stored,
             meta=meta,
         )
+        print(
+            f"[FrameOS] persist image: project_id={project_id!r} library={lib!r} kind={kind!r} "
+            f"asset_id={aid} uri={stored[:160]!r}",
+            flush=True,
+        )
+        if lib == "storyboard" and storyboard_mirror_pending is None:
+            storyboard_mirror_pending = {
+                "storyboard_library_asset_id": aid,
+                "stored": stored,
+                "display_name": display_name,
+                "meta_base": dict(meta),
+            }
+    return storyboard_mirror_pending
 
 
 def persist_video_tool_output(
@@ -133,6 +180,9 @@ def persist_video_tool_output(
         meta: dict = {"task_id": data.get("task_id")}
         if local:
             meta["remote_uri"] = uri
+        for k in ("source_image_used", "reference_image_urls_requested"):
+            if k in data and data.get(k) is not None:
+                meta[k] = data[k]
         stem6 = _stem6_from_stored_uri(stored)
         display_name = f"{summary}_{stem6}"
         insert_project_asset(

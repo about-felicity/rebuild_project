@@ -13,10 +13,18 @@
     </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FrameOS — 视频工作流</title>
-    <link rel="stylesheet" href="css/workflow.css?v=34">
+    <link rel="stylesheet" href="css/workflow.css?v=35">
 </head>
 
 <body>
+
+    <div id="frameos-boot-hint" class="frameos-boot-hint" aria-live="polite">
+        <p class="frameos-boot-hint-title">正在加载 FrameOS…</p>
+        <p class="frameos-boot-hint-sub">
+            请先在本机运行 <code>serve-lan.bat</code>（或 <code>uvicorn</code>），浏览器打开
+            <code>/app/</code>（<strong>末尾须带斜杠</strong>）。若本页超过约 20 秒不变，请按 F12 →「控制台」查看红色报错。
+        </p>
+    </div>
 
     <div class="app">
 
@@ -103,6 +111,15 @@
                         </div>
 
                         <div class="chat-input-area">
+                            <div class="chat-attach-row">
+                                <button type="button" class="chat-add-ref-slot" id="chat-add-ref-slot"
+                                    onclick="openAgentChatRefImagePicker()" title="从素材库选择作为图生视频首帧">
+                                    <span class="chat-add-ref-slot__icon" aria-hidden="true">＋</span>
+                                    <span class="chat-add-ref-slot__text">添加引用图片</span>
+                                    <span class="chat-add-ref-slot__hint">素材库</span>
+                                </button>
+                                <div id="chat-ref-chips" class="chat-ref-chips" hidden aria-label="图生视频首帧引用"></div>
+                            </div>
                             <div class="chat-presets">
                                 <button class="chat-preset" onclick="sendPreset('生成 Sora 提示词')">Sora 提示词</button>
                                 <button class="chat-preset" onclick="sendPreset('分析视频节奏与剪辑点')">节奏分析</button>
@@ -111,7 +128,7 @@
                                 <button class="chat-preset" onclick="sendPreset('视频分镜脚本')">分镜脚本</button>
                             </div>
                             <div class="chat-input-row">
-                                <textarea class="chat-input" id="chat-input" rows="2" placeholder="描述你的视频创作需求..."
+                                <textarea class="chat-input" id="chat-input" rows="2" placeholder="可描述需求与秒数；图生视频请先在素材库选图点「引用为 Agent 首帧」。Agent 生成的首帧分镜在「项目素材 → 分镜库」查看。"
                                     onkeydown="handleChatKey(event)"></textarea>
                                 <button class="send-btn" onclick="sendChatMessage()">发送</button>
                             </div>
@@ -180,6 +197,9 @@
                                 <button class="filter-tab" onclick="filterMedia('asset',this)">素材库</button>
                                 <button class="filter-tab" onclick="filterMedia('storyboard',this)">分镜库</button>
                             </div>
+                            <p class="storyboard-hint" style="margin:0.35rem 0 0;font-size:0.65rem;line-height:1.45;color:var(--muted);">
+                                Agent <code>generate_storyboard_image</code> 入库为<strong>分镜库</strong>（非「素材库」）；请点「<strong>分镜库</strong>」或「<strong>全部</strong>」查看首帧分镜。当前 Seedance 1.5 Pro 视频请求默认仅一张首帧，产品外观依赖该分镜图是否已画准。
+                            </p>
                             <div class="toolbar-spacer"></div>
                             <span class="media-bulk-toolbar-hint" id="library-bulk-count" aria-live="polite"></span>
                             <button type="button" class="toolbar-btn" onclick="selectAllVisibleVideosInLibrary()" title="勾选当前列表中全部可播放的视频">全选视频</button>
@@ -227,6 +247,7 @@
                             <div style="display:flex;flex-direction:column;gap:0.35rem;">
                                 <button type="button" class="toolbar-btn detail-lightbox-btn" id="detail-btn-lightbox"
                                     style="display:none;" onclick="openMediaLightboxFromDetail()">浏览大图</button>
+                                <button type="button" class="toolbar-btn" onclick="addSelectedMediaToChatRefs()">引用为 Agent 首帧</button>
                                 <button class="toolbar-btn" onclick="addToTimeline()">加入拼接时间轴</button>
                                 <button class="toolbar-btn" onclick="analyzeSelected()">分析提示词</button>
                                 <button class="toolbar-btn"
@@ -695,6 +716,19 @@
         </div>
     </div>
 
+    <!-- AGENT CHAT: pick reference images from asset library (i2v first frame) -->
+    <div class="modal-overlay" id="chat-ref-pick-overlay">
+        <div class="modal modal--wide">
+            <div class="modal-title">选择引用图片（图生视频首帧）</div>
+            <p class="storyboard-hint" style="margin:0;">从当前项目「素材库」中多选（最多 5 张）。人物/产品/分镜出图会带自动标注；动作示范或纯背景请在发送时的文字里说明。</p>
+            <div id="chat-ref-pick-grid" class="sb-pick-grid"></div>
+            <div class="modal-actions">
+                <button type="button" class="modal-cancel" onclick="closeAgentChatRefImagePicker()">关闭</button>
+                <button type="button" class="modal-confirm" onclick="confirmAgentChatRefImagePicker()">添加已选</button>
+            </div>
+        </div>
+    </div>
+
     <!-- STORYBOARD: pick images from project asset library -->
     <div class="modal-overlay" id="sb-pick-overlay">
         <div class="modal modal--wide">
@@ -745,7 +779,7 @@
         </figure>
     </div>
 
-    <script type="module" src="js/main.js?v=30"></script>
+    <script type="module" src="js/main.js?v=35"></script>
 </body>
 
 </html>

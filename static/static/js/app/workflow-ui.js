@@ -105,6 +105,8 @@ let lastStoryboardRunId = null;
 let storyboardPipelinePicks = [];
 /** 「从素材库选择」弹窗内临时勾选，元素为 String(mediaId) */
 let storyboardPickerTempSelected = new Set();
+/** Agent 对话「从素材库选首帧」弹窗内的多选 id（字符串） */
+let agentChatRefPickerTempSelected = new Set();
 
 function applyStoryboardServerMeta(hit, meta) {
     if (!hit || !meta || typeof meta !== "object") return;
@@ -205,6 +207,7 @@ function mergeServerAssetsIntoProject(project, rows) {
                     if (meta.size != null) hit.size = String(meta.size);
                     if (meta.dur != null) hit.dur = String(meta.dur);
                     if (meta.res != null) hit.res = String(meta.res);
+                    if (meta.destination != null) hit.genDestination = String(meta.destination);
                     applyStoryboardServerMeta(hit, meta);
                 }
                 continue;
@@ -224,6 +227,7 @@ function mergeServerAssetsIntoProject(project, rows) {
                 url: uri,
                 source: "server",
             };
+            if (meta.destination != null) item.genDestination = String(meta.destination);
             applyStoryboardServerMeta(item, meta);
             project.media.push(item);
             seen.add(sid);
@@ -246,13 +250,26 @@ async function refreshServerAssetsForProject(project) {
     const pid = String(project.id);
     try {
         const rows = await fetchProjectAssets(pid);
-        const p = state.projects.find((x) => String(x.id) === pid);
-        if (!p) return;
         if (!Array.isArray(rows) || rows.length === 0) return;
+
+        // 必须与侧边栏数组中的项合并为同一引用；否则仅 merge 传入的 orphan 对象，activeProject.media 不更新，网格一直不显示新分镜/视频。
+        let p = state.projects.find((x) => String(x.id) === pid);
+        if (!p && state.activeProject && String(state.activeProject.id) === pid) {
+            p = state.activeProject;
+            if (!state.projects.some((x) => String(x.id) === pid)) {
+                state.projects.push(p);
+            }
+        } else if (!p) {
+            p = project;
+            if (!state.projects.some((x) => String(x.id) === pid)) {
+                state.projects.push(p);
+            }
+        }
         mergeServerAssetsIntoProject(p, rows);
         migrateProjectMediaLibraries(p);
         saveProjectsToStorage();
         if (state.activeProject && String(state.activeProject.id) === pid) {
+            state.activeProject = p;
             setTopbarInfo(p.name + " · " + projectMediaCount(p) + " 个素材");
             refreshMediaGridView();
             updateContextChips();
@@ -611,7 +628,9 @@ function agentWelcomeText(project) {
         "· 分析视频素材并生成分镜脚本\n" +
         "· 描述画面风格与运镜建议\n" +
         "· 生成 Sora / ComfyUI / 剪映 等平台提示词\n" +
-        "· 管理项目素材与拼接任务\n\n" +
+        "· 管理项目素材与拼接任务\n" +
+        "· 图生视频：点对话区「添加引用图片」或素材详情「引用为 Agent 首帧」，可多张（≤5）；" +
+        "人物/产品/分镜图会尽量自动标注；动作示范/背景须你在文字里说明\n\n" +
         "请告诉我你的创作需求。"
     );
 }
@@ -874,6 +893,11 @@ async function selectProject(p) {
     rememberActiveProjectId(p.id);
     state.libraryBulkSelectedIds = {};
     state.activeProject = p;
+    state.chatRefByProject = state.chatRefByProject || {};
+    state.chatReferencedAssets = (state.chatRefByProject[String(p.id)] || [])
+        .map(normalizeChatRefEntry)
+        .filter(Boolean);
+    renderChatReferenceChips();
     renderProjects();
     setTopbarInfo(p.name + " · " + projectMediaCount(p) + " 个素材");
     const title = document.getElementById("project-panel-title");
@@ -886,6 +910,8 @@ async function selectProject(p) {
     if (sbFile) sbFile.value = "";
     refreshMediaGridView();
     updateContextChips();
+    /* 先画聊天区（欢迎语/本地缓存），避免等会话/素材接口时整页像卡死 */
+    renderChatForProject(p);
 
     const pid = String(p.id);
     stopAllPendingAssistantPolls();
@@ -901,25 +927,56 @@ async function selectProject(p) {
     }
 
     try {
-        const { messages } = await fetchAgentMessages(pid, loadCtrl.signal);
+        const settled = await Promise.allSettled([
+            fetchAgentMessages(pid, loadCtrl.signal),
+            fetchProjectAssets(pid, loadCtrl.signal),
+        ]);
         if (!isCurrentProject()) return;
-        const { keptLocal } = mergeFetchedAgentThread(pid, messages);
-        if (keptLocal) {
-            scheduleAgentThreadResync(pid);
+
+        const msgRes = settled[0];
+        if (msgRes.status === "fulfilled") {
+            const { keptLocal } = mergeFetchedAgentThread(pid, msgRes.value.messages);
+            if (keptLocal) {
+                scheduleAgentThreadResync(pid);
+            } else {
+                clearAgentThreadResyncTimer(pid);
+            }
         } else {
-            clearAgentThreadResyncTimer(pid);
+            console.warn("FrameOS: fetchAgentMessages", msgRes.reason);
         }
 
-        const assetsRaw = await fetchProjectAssets(pid, loadCtrl.signal);
-        if (!isCurrentProject()) return;
-        if (Array.isArray(assetsRaw) && assetsRaw.length > 0 && state.activeProject) {
-            mergeServerAssetsIntoProject(state.activeProject, assetsRaw);
-            migrateProjectMediaLibraries(state.activeProject);
-            saveProjectsToStorage();
-            setTopbarInfo(state.activeProject.name + " · " + projectMediaCount(state.activeProject) + " 个素材");
-            refreshMediaGridView();
-            updateContextChips();
-            renderProjects();
+        const assetRes = settled[1];
+        if (assetRes.status === "fulfilled") {
+            const assetsRaw = assetRes.value;
+            if (Array.isArray(assetsRaw) && assetsRaw.length > 0 && state.activeProject) {
+                mergeServerAssetsIntoProject(state.activeProject, assetsRaw);
+                migrateProjectMediaLibraries(state.activeProject);
+                saveProjectsToStorage();
+                setTopbarInfo(
+                    state.activeProject.name + " · " + projectMediaCount(state.activeProject) + " 个素材",
+                );
+                refreshMediaGridView();
+                updateContextChips();
+                renderProjects();
+            }
+        } else {
+            console.warn("FrameOS: fetchProjectAssets", assetRes.reason);
+            const r = assetRes.reason;
+            if (r && r.name !== "AbortError" && isCurrentProject()) {
+                showToast(
+                    "加载素材列表失败：" +
+                        (r && r.message ? r.message : String(r)).slice(0, 100),
+                );
+            }
+        }
+        if (msgRes.status === "rejected") {
+            const r = msgRes.reason;
+            if (r && r.name !== "AbortError" && isCurrentProject()) {
+                showToast(
+                    "加载对话记录失败：" +
+                        (r && r.message ? r.message : String(r)).slice(0, 100),
+                );
+            }
         }
     } catch (e) {
         if (e && e.name === "AbortError") {
@@ -942,6 +999,7 @@ async function selectProject(p) {
 
     if (!isCurrentProject()) return;
     renderChatForProject(p);
+    syncAgentChatAddRefSlot();
     syncAgentModeToggleUi();
     syncPreviewCursorFromProject();
     if (shouldStartAssistantPollForProject(pid)) {
@@ -959,6 +1017,12 @@ function renderChatForProject(project) {
     if (!project) {
         box.innerHTML =
             '<div class="chat-empty-hint" style="padding:1.5rem 1rem;text-align:center;color:var(--muted);font-size:0.6875rem;letter-spacing:0.06em;">请从左侧选择项目，或点击「新建项目」开始对话</div>';
+        const hr = document.getElementById("chat-ref-chips");
+        if (hr) {
+            hr.innerHTML = "";
+            hr.hidden = true;
+        }
+        syncAgentChatAddRefSlot();
         updateStats();
         syncAgentModeToggleUi();
         requestAnimationFrame(() => {
@@ -992,6 +1056,8 @@ function renderChatForProject(project) {
   </div>`);
     }
     updateStats();
+    syncAgentChatAddRefSlot();
+    renderChatReferenceChips();
     requestAnimationFrame(() => {
         box.scrollTop = box.scrollHeight;
         syncChatToolbarVisibility();
@@ -1013,9 +1079,11 @@ async function init() {
     renderProjects();
     startSessionTimer();
     let initial = pickInitialProject();
-    if (initial) await selectProject(initial);
-
-    await mergeServerChatProjectsIntoSidebar();
+    const mergeP = mergeServerChatProjectsIntoSidebar();
+    if (initial) {
+        await selectProject(initial);
+    }
+    await mergeP;
     renderProjects();
     if (!state.activeProject) {
         initial = pickInitialProject();
@@ -1127,6 +1195,270 @@ function isLikelyRasterImageUrl(u) {
     if (/\.(png|jpe?g|gif|webp|bmp|svg)$/.test(path)) return true;
     if (/^https?:\/\//i.test(u)) return true;
     return u.startsWith("/");
+}
+
+const CHAT_REF_MAX = 5;
+
+/** 与 ``/api/agent/chat`` 的 ``referenced_asset_ids`` 一致：SQLite ``project_assets.id`` */
+function serverAssetIdFromMediaItem(m) {
+    const sid = m != null && m._serverAssetId != null ? Number(m._serverAssetId) : NaN;
+    return Number.isFinite(sid) && sid > 0 ? sid : null;
+}
+
+function normalizeChatRefEntry(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    let sid = raw.serverAssetId != null ? Number(raw.serverAssetId) : NaN;
+    if (!Number.isFinite(sid) || sid <= 0) {
+        const legacy = Number(raw.id);
+        if (Number.isFinite(legacy) && legacy >= SERVER_ASSET_ID_BASE) {
+            sid = legacy - SERVER_ASSET_ID_BASE;
+        } else if (Number.isFinite(legacy) && legacy > 0 && legacy < SERVER_ASSET_ID_BASE) {
+            sid = legacy;
+        }
+    }
+    if (!Number.isFinite(sid) || sid <= 0) return null;
+    return {
+        serverAssetId: sid,
+        name: String(raw.name || "素材"),
+        url: String(raw.url || ""),
+        genDestination: raw.genDestination != null ? String(raw.genDestination) : undefined,
+    };
+}
+
+function enrichChatRefFromProjectMedia(ref) {
+    const p = state.activeProject;
+    if (!p || !ref) return ref;
+    const sid = Number(ref.serverAssetId);
+    const m = (p.media || []).find((x) => Number(x._serverAssetId) === sid);
+    if (m && m.genDestination != null) return { ...ref, genDestination: String(m.genDestination) };
+    return ref;
+}
+
+function inferRefSemanticShort(ref) {
+    const r = enrichChatRefFromProjectMedia(ref);
+    const d = r && r.genDestination != null ? String(r.genDestination) : "";
+    const u = String(r?.url || "").toLowerCase();
+    if (d === "character_library") return "人物";
+    if (d === "product_library") return "产品";
+    if (d === "storyboard_library") return "分镜图";
+    if (u.includes("/storyboard_runs/") && u.includes("/storyboard_frames/")) return "分镜帧";
+    return "素材";
+}
+
+function canReferenceMediaForAgentVideo(m) {
+    if (!m || serverAssetIdFromMediaItem(m) == null) return false;
+    const t = m.type || "image";
+    if (t === "video" || t === "storyboard") return false;
+    return isLikelyRasterImageUrl(String(m.url || ""));
+}
+
+function persistChatRefsForActiveProject() {
+    const p = state.activeProject;
+    if (!p) return;
+    const pid = String(p.id);
+    if (!state.chatRefByProject) state.chatRefByProject = {};
+    state.chatRefByProject[pid] = [...(state.chatReferencedAssets || [])];
+}
+
+function renderChatReferenceChips() {
+    const host = document.getElementById("chat-ref-chips");
+    if (!host) return;
+    const arr = state.chatReferencedAssets || [];
+    if (!arr.length) {
+        host.innerHTML = "";
+        host.hidden = true;
+        syncAgentChatAddRefSlot();
+        return;
+    }
+    host.hidden = false;
+    host.innerHTML =
+        '<span class="chat-ref-kicker">引用</span>' +
+        arr
+            .map((raw) => {
+                const x = enrichChatRefFromProjectMedia(raw);
+                const tag = inferRefSemanticShort(x);
+                const sid = Number(x.serverAssetId);
+                return `<span class="chat-ref-chip" title="${escAttr(x.name || "")}"><span class="chat-ref-chip-role">${escHtml(tag)}</span><span class="chat-ref-chip-id">#${escAttr(String(sid))}</span> ${escHtml((x.name || "素材").slice(0, 14))}<button type="button" class="chat-ref-chip-x" data-rid="${escAttr(String(sid))}" aria-label="移除">×</button></span>`;
+            })
+            .join("");
+    host.querySelectorAll(".chat-ref-chip-x").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+            e.preventDefault();
+            const rid = btn.getAttribute("data-rid");
+            removeChatReferenceAsset(rid);
+        });
+    });
+    syncAgentChatAddRefSlot();
+}
+
+function removeChatReferenceAsset(rid) {
+    const id = String(rid);
+    state.chatReferencedAssets = (state.chatReferencedAssets || []).filter(
+        (x) => String(x.serverAssetId) !== id,
+    );
+    persistChatRefsForActiveProject();
+    renderChatReferenceChips();
+}
+
+function syncAgentChatAddRefSlot() {
+    const btn = document.getElementById("chat-add-ref-slot");
+    if (!btn) return;
+    btn.disabled = !state.activeProject;
+}
+
+function getAgentChatRefPickerImages() {
+    return getStoryboardEligibleProjectImages().filter((m) => canReferenceMediaForAgentVideo(m));
+}
+
+function renderAgentChatRefPickerGrid() {
+    const grid = document.getElementById("chat-ref-pick-grid");
+    if (!grid) return;
+    const items = getAgentChatRefPickerImages();
+    if (!items.length) {
+        grid.innerHTML =
+            '<p class="storyboard-hint" style="grid-column:1/-1;margin:0;">当前项目素材库中没有可用的栅格图片。请先到「项目素材 → 素材库」导入图片并等待同步完成。</p>';
+        return;
+    }
+    grid.innerHTML = items
+        .map((m) => {
+            const sid = serverAssetIdFromMediaItem(m);
+            if (sid == null) return "";
+            const sk = String(sid);
+            const abs = resolveAssetPreviewUrl(m.url);
+            const thumb = frameosRasterPreviewUrl(abs, m.url, 160, 160) || frameosMediaFileFetchUrl(m.url) || abs;
+            const fail = mediaThumbFailoverAttrs(thumb, m.url);
+            const on = agentChatRefPickerTempSelected.has(sk);
+            return `<div class="sb-pick-card${on ? " is-on" : ""}" data-chat-ref-media-id="${escAttr(sk)}" role="button" tabindex="0" title="${escAttr(m.name || "")}">
+  <img src="${escAttr(thumb)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" width="160" height="160"${fail}>
+  <span class="sb-pick-card-badge">${on ? "✓" : ""}</span>
+</div>`;
+        })
+        .filter(Boolean)
+        .join("");
+}
+
+function toggleAgentChatRefPickerCard(rawId) {
+    const k = String(rawId || "").trim();
+    if (!k) return;
+    if (agentChatRefPickerTempSelected.has(k)) {
+        agentChatRefPickerTempSelected.delete(k);
+    } else {
+        if (agentChatRefPickerTempSelected.size >= CHAT_REF_MAX) {
+            showToast(`最多同时选 ${CHAT_REF_MAX} 张`);
+            return;
+        }
+        agentChatRefPickerTempSelected.add(k);
+    }
+    renderAgentChatRefPickerGrid();
+}
+
+function openAgentChatRefImagePicker() {
+    if (!state.activeProject) {
+        showToast("请先选择项目");
+        return;
+    }
+    agentChatRefPickerTempSelected = new Set(
+        (state.chatReferencedAssets || []).map((x) => String(x.serverAssetId)),
+    );
+    renderAgentChatRefPickerGrid();
+    document.getElementById("chat-ref-pick-overlay")?.classList.add("open");
+}
+
+function closeAgentChatRefImagePicker() {
+    document.getElementById("chat-ref-pick-overlay")?.classList.remove("open");
+}
+
+function confirmAgentChatRefImagePicker() {
+    if (!state.activeProject) {
+        closeAgentChatRefImagePicker();
+        return;
+    }
+    const project = state.activeProject;
+    const next = [];
+    for (const m of getAgentChatRefPickerImages()) {
+        const sid = serverAssetIdFromMediaItem(m);
+        if (sid == null || !agentChatRefPickerTempSelected.has(String(sid))) continue;
+        if (next.length >= CHAT_REF_MAX) break;
+        next.push({
+            serverAssetId: sid,
+            name: m.name || "素材",
+            url: m.url || "",
+            genDestination: m.genDestination != null ? String(m.genDestination) : undefined,
+        });
+    }
+    state.chatReferencedAssets = next;
+    persistChatRefsForActiveProject();
+    renderChatReferenceChips();
+    closeAgentChatRefImagePicker();
+    if (next.length) {
+        showToast(`已引用 ${next.length} 张图片 · 输入秒数与描述后发送`);
+    } else {
+        showToast("未选择图片");
+    }
+}
+
+function addChatReferenceFromMedia(m) {
+    if (!canReferenceMediaForAgentVideo(m)) {
+        showToast("请选已同步的图片（勿选视频/分镜 JSON）；若刚上传请等列表刷新后再试");
+        return;
+    }
+    const sid = serverAssetIdFromMediaItem(m);
+    if (sid == null) {
+        showToast("该条目缺少服务器素材 id，请刷新素材后再引用");
+        return;
+    }
+    const cur = state.chatReferencedAssets || [];
+    if (cur.some((x) => Number(x.serverAssetId) === sid)) {
+        showToast("已在首帧引用列表中");
+        renderChatReferenceChips();
+        return;
+    }
+    if (cur.length >= CHAT_REF_MAX) {
+        showToast(`最多同时引用 ${CHAT_REF_MAX} 张图`);
+        return;
+    }
+    cur.push({
+        serverAssetId: sid,
+        name: m.name || "素材",
+        url: m.url || "",
+        genDestination: m.genDestination != null ? String(m.genDestination) : undefined,
+    });
+    state.chatReferencedAssets = cur;
+    persistChatRefsForActiveProject();
+    renderChatReferenceChips();
+    showToast("已加入首帧引用 · 输入秒数与画面需求后发送");
+}
+
+/** 清除某项目在「引用为 Agent 首帧」中的记录；仅当当前正在查看该项目时重绘 chips。 */
+function clearChatReferenceAssetsForProject(projectId) {
+    const id = String(projectId || "").trim();
+    if (!id) return;
+    if (!state.chatRefByProject) state.chatRefByProject = {};
+    state.chatRefByProject[id] = [];
+    if (state.activeProject && String(state.activeProject.id) === id) {
+        state.chatReferencedAssets = [];
+        renderChatReferenceChips();
+        syncAgentChatAddRefSlot();
+    }
+}
+
+function clearChatReferenceAssets() {
+    if (state.activeProject) {
+        clearChatReferenceAssetsForProject(state.activeProject.id);
+    } else {
+        state.chatReferencedAssets = [];
+        renderChatReferenceChips();
+        syncAgentChatAddRefSlot();
+    }
+}
+
+function addSelectedMediaToChatRefs() {
+    const m = state.selectedMedia;
+    if (!m) {
+        showToast("请先在素材库选中一张图片");
+        return;
+    }
+    addChatReferenceFromMedia(m);
 }
 
 function mediaItemCanLargeView(m) {
@@ -2279,6 +2611,39 @@ function handleChatKey(e) {
     }
 }
 
+/** Agent 本轮 tool_trace：附在聊天区，避免用户只看到 Toast 找不到分镜/首帧路径（不写入服务端消息表）。 */
+function appendAgentToolTraceHtml(toolTrace) {
+    const msgs = document.getElementById("chat-messages");
+    if (!msgs || !toolTrace || typeof toolTrace !== "object") return;
+    const sb = Array.isArray(toolTrace.storyboard_uris) ? toolTrace.storyboard_uris : [];
+    const vids = Array.isArray(toolTrace.videos) ? toolTrace.videos : [];
+    const parts = [];
+    if (sb.length) {
+        const u = String(sb[sb.length - 1] || "");
+        parts.push(
+            `<div><strong>分镜首帧</strong>（分镜库 + 素材库各一条，同一文件）<br><code style="word-break:break-all;font-size:0.65rem">${escHtml(u)}</code></div>`,
+        );
+    }
+    if (vids.length) {
+        const v = vids[vids.length - 1] || {};
+        const ff = String(v.first_frame_url || "").trim();
+        const nref = Array.isArray(v.reference_image_urls_requested)
+            ? v.reference_image_urls_requested.length
+            : 0;
+        if (ff) {
+            parts.push(
+                `<div style="margin-top:0.4rem"><strong>本段视频首帧（方舟）</strong><br><code style="word-break:break-all;font-size:0.65rem">${escHtml(ff)}</code></div>`,
+            );
+        }
+        parts.push(
+            `<div class="storyboard-hint" style="margin-top:0.35rem">视频请求里参考图张数：${nref}（Seedance 1.5 Pro 可能仅实际使用首帧）。请在左侧「项目素材」→「素材库」或「分镜库」查看分镜缩略图。</div>`,
+        );
+    }
+    if (!parts.length) return;
+    const html = `<div class="msg agent" style="opacity:0.94"><div class="msg-meta">生成追溯</div><div class="msg-bubble" style="font-size:0.72rem;line-height:1.5">${parts.join("")}</div></div>`;
+    appendMessageRaw(html);
+}
+
 async function sendChatMessage() {
     if (!state.activeProject) {
         showToast("请先选择一个项目");
@@ -2292,10 +2657,17 @@ async function sendChatMessage() {
     const project = state.activeProject;
     const projectId = String(project.id);
     const projectName = project.name;
+    const refIds = (state.chatReferencedAssets || [])
+        .map((x) => Number(x.serverAssetId))
+        .filter((n) => Number.isFinite(n) && n > 0);
+    const refNote =
+        refIds.length > 0
+            ? `\n（已引用 ${refIds.length} 张素材库图片，服务器 id：${refIds.join("、")}；首帧默认第 1 张，除非你在上文指定）`
+            : "";
 
     stopPendingAssistantPoll(projectId);
     clearAgentThreadResyncTimer(projectId);
-    appendMessageForProject(projectId, "user", text);
+    appendMessageForProject(projectId, "user", text + refNote);
 
     state.agentTypingProjectId = projectId;
     if (state.activeProject && String(state.activeProject.id) === projectId) {
@@ -2307,15 +2679,31 @@ async function sendChatMessage() {
     }
 
     try {
-        const resp = await requestAgentReply({
-            text,
+        // message 须含 refNote：与气泡一致，且后端可从「服务器 id：…」兜底解析 referenced_asset_ids
+        const { reply: resp, tool_trace: toolTrace } = await requestAgentReply({
+            text: text + refNote,
             projectName,
             projectId,
             agent_mode: getAgentModeForProject(projectId),
+            referenced_asset_ids: refIds.length ? refIds : undefined,
         });
         appendMessageForProject(projectId, "agent", resp);
+        if (toolTrace && typeof toolTrace === "object") {
+            const sb = Array.isArray(toolTrace.storyboard_uris) ? toolTrace.storyboard_uris : [];
+            const vids = Array.isArray(toolTrace.videos) ? toolTrace.videos : [];
+            if (sb.length || vids.length) {
+                console.info("[FrameOS] Agent tool_trace", toolTrace);
+                showToast("生成追溯已附在对话下方（分镜 / 视频首帧 URI）", 5000);
+                appendAgentToolTraceHtml(toolTrace);
+            }
+        }
+        if (refIds.length) {
+            clearChatReferenceAssetsForProject(projectId);
+        }
         updateStats();
-        const projRef = state.projects.find((x) => String(x.id) === projectId);
+        const projRef =
+            state.projects.find((x) => String(x.id) === projectId) ||
+            (state.activeProject && String(state.activeProject.id) === projectId ? state.activeProject : null);
         if (projRef) {
             await refreshServerAssetsForProject(projRef);
         }
@@ -2324,11 +2712,13 @@ async function sendChatMessage() {
         }
     } catch (err) {
         const isAbort = err && err.name === "AbortError";
+        const agentTo = Number(CONFIG.AGENT_CHAT_TIMEOUT_MS);
+        const abortSec = Number.isFinite(agentTo) && agentTo > 0 ? agentTo : 300000;
         appendMessageForProject(
             projectId,
             "agent",
             isAbort
-                ? "请求超时（约 " + String(Math.round(CONFIG.REQUEST_TIMEOUT_MS / 1000)) + " 秒无响应），请重试。"
+                ? "请求超时（约 " + String(Math.round(abortSec / 1000)) + " 秒无响应），请重试。"
                 : "请求失败：" + (err && err.message ? err.message : String(err)),
         );
         updateStats();
@@ -2412,6 +2802,7 @@ async function clearChat() {
     }
     state.agentThreads[pid] = [];
     state.agentTypingProjectId = null;
+    clearChatReferenceAssets();
     stopPendingAssistantPoll(pid);
     document.getElementById(CHAT_TYPING_DOM_ID)?.remove();
     renderChatForProject(state.activeProject);
@@ -3418,17 +3809,21 @@ function startSessionTimer() {
 }
 
 // ===== TOAST =====
-function showToast(msg) {
+function showToast(msg, durationMs) {
+    const ms =
+        Number.isFinite(Number(durationMs)) && Number(durationMs) > 0 ? Number(durationMs) : 2200;
     const t = document.createElement('div');
-    t.style.cssText = `position:fixed;bottom:1.5rem;right:1.5rem;background:var(--fg);color:var(--bg);font-family:var(--font-ui);font-size:0.8125rem;font-weight:500;letter-spacing:0.02em;padding:0.55rem 1rem;border-radius:0.4375rem;z-index:999;opacity:0;transition:opacity 0.2s;pointer-events:none;box-shadow:0 8px 24px color-mix(in oklab,var(--fg) 22%,transparent);`;
+    t.style.cssText = `position:fixed;bottom:1.5rem;right:1.5rem;max-width:min(92vw,28rem);white-space:pre-wrap;background:var(--fg);color:var(--bg);font-family:var(--font-ui);font-size:0.8125rem;font-weight:500;letter-spacing:0.02em;padding:0.55rem 1rem;border-radius:0.4375rem;z-index:999;opacity:0;transition:opacity 0.2s;pointer-events:none;box-shadow:0 8px 24px color-mix(in oklab,var(--fg) 22%,transparent);`;
     t.textContent = msg;
     document.body.appendChild(t);
     requestAnimationFrame(() => { t.style.opacity = '1'; });
-    setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 200); }, 2200);
+    setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 200); }, ms);
 }
 
 /** 供 index.html 内联 onclick 使用（后续可改为 data-action + 事件委托） */
 export function mountFrameOS() {
+    document.getElementById("frameos-boot-hint")?.remove();
+
     document.getElementById("modal-overlay")?.addEventListener("click", function (e) {
         if (e.target === this) closeModal();
     });
@@ -3440,6 +3835,14 @@ export function mountFrameOS() {
         if (!card) return;
         toggleStoryboardPickerCard(card.dataset.mediaId);
     });
+    document.getElementById("chat-ref-pick-overlay")?.addEventListener("click", function (e) {
+        if (e.target === this) closeAgentChatRefImagePicker();
+    });
+    document.getElementById("chat-ref-pick-grid")?.addEventListener("click", (e) => {
+        const card = e.target.closest(".sb-pick-card[data-chat-ref-media-id]");
+        if (!card) return;
+        toggleAgentChatRefPickerCard(card.dataset.chatRefMediaId);
+    });
     document.getElementById("local-data-overlay")?.addEventListener("click", function (e) {
         if (e.target === this) closeLocalDataPanel();
     });
@@ -3449,6 +3852,7 @@ export function mountFrameOS() {
 
     bindChatToolbarScrollReveal();
     syncChatToolbarVisibility();
+    renderChatReferenceChips();
     bindSplicePreviewVideoOnce();
     renderStoryboardPickChips();
     syncAgentModeToggleUi();
@@ -3501,6 +3905,9 @@ export function mountFrameOS() {
         openStoryboardLibraryPicker,
         closeStoryboardLibraryPicker,
         confirmStoryboardLibraryPicker,
+        openAgentChatRefImagePicker,
+        closeAgentChatRefImagePicker,
+        confirmAgentChatRefImagePicker,
         onStoryboardLocalFilesPicked,
         removeStoryboardPipelinePick,
         openStoryboardLibraryInProject,
@@ -3517,10 +3924,15 @@ export function mountFrameOS() {
         selectClip,
         addGeneratedAssetToActiveProject,
         scrollChatToTop,
+        addSelectedMediaToChatRefs,
         deleteProjectAndData,
         toggleAgentCreativeMode,
         syncAgentModeToggleUi,
     });
 
-    void init().catch((e) => console.warn("FrameOS: init failed", e));
+    void init().catch((e) => {
+        console.warn("FrameOS: init failed", e);
+        const m = e && e.message ? e.message : String(e);
+        showToast("界面初始化未完成：" + m.slice(0, 120));
+    });
 }

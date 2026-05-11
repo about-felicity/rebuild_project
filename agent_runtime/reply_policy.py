@@ -21,6 +21,15 @@ _HALLUCINATED_SUCCESS_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
+# 工具已失败时，模型仍编造「联系管理员调像素」等（与当前服务端行为不符）
+_MISLEADING_OPS_ADVICE = (
+    "联系管理员",
+    "管理员调整",
+    "系统侧的限制",
+    "我无法调整",
+    "服务端固定参数",
+)
+
 
 def _norm_block_type(block: Any) -> str:
     if isinstance(block, dict):
@@ -101,6 +110,110 @@ def compact_generation_reply(hist: list[dict[str, Any]]) -> str | None:
     return None
 
 
+def extract_generation_tool_trace(hist: list[dict[str, Any]]) -> dict[str, Any]:
+    """
+    从本轮 ``hist`` 里解析所有生图/生视频 tool_result JSON，供 ``/api/agent/chat`` 返回 ``tool_trace``，
+    便于前端提示「分镜是否入库」「视频首帧 URI」等（不依赖模型自然语言）。
+    """
+    storyboard_uris: list[str] = []
+    asset_image_uris: list[str] = []
+    videos: list[dict[str, Any]] = []
+
+    for msg in hist:
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            payload = _tool_result_json_string(block)
+            if not payload or payload.startswith("Error:"):
+                continue
+            try:
+                data = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(data, dict):
+                continue
+            if data.get("ok") is False:
+                continue
+            created = data.get("created_asset_ids") or []
+            if not created:
+                continue
+            dest = data.get("destination")
+            if isinstance(dest, str) and dest == "storyboard_library":
+                for x in created:
+                    storyboard_uris.append(str(x).strip())
+                continue
+            if isinstance(dest, str) and dest in ("character_library", "product_library"):
+                for x in created:
+                    asset_image_uris.append(str(x).strip())
+                continue
+            # 视频：带追溯字段，或根据输出 URL 推断
+            if data.get("source_image_used") is not None or data.get(
+                "reference_image_urls_requested"
+            ) is not None:
+                videos.append(
+                    {
+                        "first_frame_url": str(data.get("source_image_used") or ""),
+                        "reference_image_urls_requested": list(
+                            data.get("reference_image_urls_requested") or []
+                        ),
+                        "output_uris": [str(x).strip() for x in created if x],
+                    }
+                )
+                continue
+            first = str(created[0]).strip().lower()
+            if ".mp4" in first or "video" in first or "/video" in first:
+                videos.append(
+                    {
+                        "first_frame_url": "",
+                        "reference_image_urls_requested": [],
+                        "output_uris": [str(x).strip() for x in created if x],
+                    }
+                )
+
+    return {
+        "storyboard_uris": storyboard_uris,
+        "asset_image_uris": asset_image_uris,
+        "videos": videos,
+    }
+
+
+def _failure_line_from_penultimate_user_tool_batch(hist: list) -> str | None:
+    """
+    取「最后一条助手回复」前一条 user 消息里的 tool_result 失败摘要（通常为刚结束的一轮工具）。
+    用于在模型胡编「联系管理员」时用 Ark/工具原文覆盖。
+    """
+    if len(hist) < 2:
+        return None
+    turn = hist[-2]
+    if turn.get("role") != "user":
+        return None
+    content = turn.get("content")
+    if not isinstance(content, list):
+        return None
+    errs: list[str] = []
+    for block in content:
+        payload = _tool_result_json_string(block)
+        if not payload:
+            continue
+        s = payload.strip()
+        if s.startswith("Error:"):
+            errs.append(s[:900])
+            continue
+        try:
+            j = json.loads(s)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(j, dict) and j.get("ok") is False:
+            msg = str(j.get("error") or "").strip()
+            errs.append((msg or json.dumps(j, ensure_ascii=False))[:900])
+    if not errs:
+        return None
+    return errs[-1]
+
+
 def apply_assistant_reply_policy(hist: list, reply: str) -> str:
     """
     **输入**：已去掉 Markdown 外链图后的模型可见回复。
@@ -109,6 +222,15 @@ def apply_assistant_reply_policy(hist: list, reply: str) -> str:
     minimal = compact_generation_reply(hist)
     if minimal:
         return minimal
+
+    tool_fail = _failure_line_from_penultimate_user_tool_batch(hist)
+    if tool_fail and (
+        not (reply or "").strip()
+        or any(p in (reply or "") for p in _MISLEADING_OPS_ADVICE)
+        or ("像素" in (reply or "") and "下限" in (reply or ""))
+    ):
+        return f"未成功：{tool_fail}"
+
     if reply and _HALLUCINATED_SUCCESS_RE.search(reply):
         return (
             "未检测到实际的生图/生视频成功记录（模型可能未调用工具或在编造「已生成」）。"

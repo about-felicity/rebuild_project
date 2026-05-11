@@ -258,6 +258,34 @@ def _rows_to_asset_dicts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
     return out
 
 
+def resolve_chat_referenced_assets(
+    project_id: str, asset_ids: list[int],
+) -> list[dict[str, Any]]:
+    """
+    校验并解析对话里引用的素材 id（须属于当前项目或公共库，见 ``list_project_assets``）。
+    返回顺序与 ``asset_ids`` 中首次出现的顺序一致，跳过无效 id。
+    """
+    if not asset_ids:
+        return []
+    rows = list_project_assets(project_id)
+    by_id = {int(r["id"]): r for r in rows}
+    seen: set[int] = set()
+    out: list[dict[str, Any]] = []
+    for raw in asset_ids:
+        try:
+            aid = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if aid in seen:
+            continue
+        row = by_id.get(aid)
+        if row is None:
+            continue
+        seen.add(aid)
+        out.append(row)
+    return out
+
+
 def list_project_assets(
     project_id: str, library: str | None = None
 ) -> list[dict[str, Any]]:

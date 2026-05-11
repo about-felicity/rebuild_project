@@ -1,5 +1,5 @@
 import { CONFIG } from "../config.js";
-import { apiDelete, apiGet, apiPost } from "./http.js";
+import { apiDelete, apiGet, apiRequest } from "./http.js";
 
 /** @param {unknown} data */
 function normalizeMessagesResponse(data) {
@@ -49,9 +49,17 @@ export async function fetchAgentMessages(projectId, signal) {
     if (CONFIG.USE_MOCK_API) {
         return { messages: [] };
     }
+    const boot =
+        Number.isFinite(Number(CONFIG.BOOTSTRAP_READ_TIMEOUT_MS)) &&
+        Number(CONFIG.BOOTSTRAP_READ_TIMEOUT_MS) > 0
+            ? Number(CONFIG.BOOTSTRAP_READ_TIMEOUT_MS)
+            : 18000;
     const data = await apiGet(
         `/api/agent/sessions/${encodeURIComponent(projectId)}/messages`,
-        signal ? { signal } : {}
+        {
+            ...(signal ? { signal } : {}),
+            timeoutMs: boot,
+        },
     );
     const messages = normalizeMessagesResponse(data);
     return { messages };
@@ -77,24 +85,40 @@ function mockAgentReply(text, projectName) {
 }
 
 /**
- * @param {{ text: string, projectName?: string, projectId: string, agent_mode?: "normal"|"abstract" }} payload
- * @returns {Promise<string>} 助手纯文本
+ * @param {{ text: string, projectName?: string, projectId: string, agent_mode?: "normal"|"abstract", referenced_asset_ids?: number[] }} payload
+ * @returns {Promise<{ reply: string, tool_trace?: Record<string, unknown> | null }>}
  */
 export async function requestAgentReply(payload) {
     if (CONFIG.USE_MOCK_API) {
         const delay = 400 + Math.random() * 500;
         await new Promise((r) => setTimeout(r, delay));
-        return mockAgentReply(payload.text, payload.projectName || "");
+        const reply = mockAgentReply(payload.text, payload.projectName || "");
+        return { reply, tool_trace: null };
     }
     const mode = payload.agent_mode === "abstract" ? "abstract" : "normal";
-    const data = await apiPost("/api/agent/chat", {
+    const body = {
         message: payload.text,
         project: payload.projectName,
         project_id: payload.projectId,
         agent_mode: mode,
+    };
+    const rids = Array.isArray(payload.referenced_asset_ids)
+        ? payload.referenced_asset_ids
+              .map((x) => Number(x))
+              .filter((n) => Number.isFinite(n) && n > 0)
+        : [];
+    if (rids.length) body.referenced_asset_ids = rids;
+    const agentMs = Number(CONFIG.AGENT_CHAT_TIMEOUT_MS);
+    const chatMs =
+        Number.isFinite(agentMs) && agentMs > 0 ? agentMs : 300000;
+    const data = await apiRequest("/api/agent/chat", {
+        method: "POST",
+        body: JSON.stringify(body),
+        timeoutMs: chatMs,
     });
-    if (typeof data === "string") return data;
-    return data.reply ?? data.content ?? data.message ?? JSON.stringify(data);
+    if (typeof data === "string") return { reply: data, tool_trace: null };
+    const reply = data.reply ?? data.content ?? data.message ?? JSON.stringify(data);
+    return { reply: String(reply), tool_trace: data.tool_trace ?? null };
 }
 
 /**

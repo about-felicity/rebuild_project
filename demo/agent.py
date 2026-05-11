@@ -107,7 +107,7 @@ TOOLS: list[dict[str, Any]] = [
                 },
                 "wan_size": {
                     "type": "string",
-                    "description": "输出规格：wan2.7-image 仅 1K/2K；wan2.7-image-pro 文生图无参图时可 4K。默认 2K",
+                    "description": "分镜出图分辨率：竖屏 9:16 默认 1080*1920；可写 2K/4K 或 WxH。未填则用环境变量 STORYBOARD_FRAME_SIZE",
                 },
                 "product_ref_image_index": {
                     "type": "integer",
@@ -205,7 +205,11 @@ def tool_run_storyboard_pipeline(inp: dict[str, Any]) -> str:
             fill_prompts=fill_prompts,
             generate_shot_images=gen_img,
             wan_model=str(inp.get("wan_model") or "wan2.7-image-pro"),
-            wan_size=str(inp.get("wan_size") or "2K"),
+            wan_size=str(
+                inp.get("wan_size")
+                or os.environ.get("STORYBOARD_FRAME_SIZE", "").strip()
+                or "1080*1920"
+            ),
             product_ref_index=wan_ref_override,
             frames_subdir=str(inp.get("shot_images_dir") or "storyboard_frames"),
             write_prompt_preview_tsv=bool(inp.get("write_prompt_preview_tsv", True)),
