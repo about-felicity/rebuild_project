@@ -46,6 +46,9 @@
             height: 100dvh;
             overflow: hidden;
             -webkit-font-smoothing: antialiased;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
         }
 
         /* 主模块未挂载前：避免误以为「浏览器坏了」 */
@@ -89,7 +92,9 @@
         /* ===== LAYOUT ===== */
         .app {
             display: flex;
-            height: 100dvh;
+            flex: 1 1 auto;
+            min-height: 0;
+            min-width: 0;
         }
 
         /* SIDEBAR */
@@ -152,7 +157,10 @@
             gap: 0.5rem;
             padding: 0.4rem 1rem;
             cursor: pointer;
-            transition: background 0.12s;
+            transition:
+                background 0.2s ease,
+                color 0.2s ease,
+                transform 0.18s ease;
             border: none;
             background: none;
             width: 100%;
@@ -161,6 +169,10 @@
             font-size: 0.75rem;
             color: var(--muted);
             letter-spacing: 0.04em;
+        }
+
+        .nav-item:active {
+            transform: scale(0.98);
         }
 
         .nav-item:hover {
@@ -208,8 +220,15 @@
             cursor: pointer;
             font-size: 0.6875rem;
             color: var(--muted);
-            transition: background 0.12s;
+            transition:
+                background 0.2s ease,
+                color 0.2s ease,
+                transform 0.16s ease;
             min-width: 0;
+        }
+
+        .project-item:active {
+            transform: scale(0.99);
         }
 
         .project-item:hover {
@@ -323,8 +342,16 @@
             font-family: var(--font-ui);
             border-bottom: 2px solid transparent;
             margin-bottom: -1px;
-            transition: color 0.15s, border-color 0.15s;
+            transition:
+                color 0.22s ease,
+                border-color 0.22s ease,
+                background-color 0.22s ease,
+                transform 0.18s ease;
             white-space: nowrap;
+        }
+
+        .tab:active {
+            transform: scale(0.97);
         }
 
         .tab:hover {
@@ -348,9 +375,8 @@
         }
 
         /*
-         * 多模块页：叠放在 .main-panels 内，仅当前页 display:flex。
-         * 若把多个 .panel 直接放在 .main 里当 flex 子项，部分浏览器在「兄弟为 display:none」时
-         * 仍可能错误参与 flex 行高/裁剪，表现为素材网格「上半屏被挡、底部正常」。
+         * 多模块页：叠放在 .main-panels 内。用 opacity + visibility 过渡（不用 display:none），
+         * 否则模块切换无法做动画。非 active 仍 display:flex 以保持子布局高度正确。
          */
         .main-panels {
             flex: 1;
@@ -367,16 +393,52 @@
             width: 100%;
             height: 100%;
             margin: 0;
-            display: none !important;
+            display: flex !important;
             flex-direction: column;
             min-height: 0;
             min-width: 0;
             overflow: hidden;
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
+            transform: translate3d(0, 0.45rem, 0);
+            transition:
+                opacity 0.28s ease,
+                transform 0.32s cubic-bezier(0.22, 1, 0.36, 1),
+                visibility 0.32s;
+            z-index: 0;
         }
 
         .main-panels > .panel.active {
-            display: flex !important;
+            opacity: 1;
+            visibility: visible;
+            pointer-events: auto;
+            transform: translate3d(0, 0, 0);
             z-index: 1;
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .main-panels > .panel {
+                transition-duration: 0.01ms;
+                transition-delay: 0s;
+                transform: none;
+            }
+
+            .nav-item:active,
+            .tab:active,
+            .project-item:active,
+            .filter-tab:active,
+            .json-view-tab:active {
+                transform: none;
+            }
+
+            .nav-item,
+            .tab,
+            .project-item,
+            .filter-tab,
+            .json-view-tab {
+                transition-duration: 0.08s;
+            }
         }
 
         /* ===== AGENT PANEL ===== */
@@ -1527,7 +1589,15 @@
             padding: 0.2rem 0.5rem;
             cursor: pointer;
             text-transform: uppercase;
-            transition: all 0.15s;
+            transition:
+                color 0.2s ease,
+                background-color 0.2s ease,
+                border-color 0.2s ease,
+                transform 0.16s ease;
+        }
+
+        .filter-tab:active {
+            transform: scale(0.96);
         }
 
         .filter-tab.active {
@@ -1779,6 +1849,23 @@
             min-width: 0;
             overflow-wrap: anywhere;
             word-break: break-word;
+        }
+
+        .media-server-id {
+            font-size: 0.5rem;
+            color: var(--muted);
+            letter-spacing: 0.03em;
+            line-height: 1.35;
+            margin-top: 0.12rem;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .media-server-id--pending {
+            color: var(--accent-warm);
+        }
+
+        .media-server-id--local {
+            opacity: 0.92;
         }
 
         .media-check {
@@ -3198,7 +3285,15 @@
             padding: 0.2rem 0.5rem;
             cursor: pointer;
             text-transform: uppercase;
-            transition: all 0.15s;
+            transition:
+                color 0.2s ease,
+                border-color 0.2s ease,
+                background-color 0.2s ease,
+                transform 0.16s ease;
+        }
+
+        .json-view-tab:active {
+            transform: scale(0.96);
         }
 
         .json-view-tab.active {

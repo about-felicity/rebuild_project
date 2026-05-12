@@ -110,7 +110,7 @@ export async function requestAgentReply(payload) {
     if (rids.length) body.referenced_asset_ids = rids;
     const agentMs = Number(CONFIG.AGENT_CHAT_TIMEOUT_MS);
     const chatMs =
-        Number.isFinite(agentMs) && agentMs > 0 ? agentMs : 300000;
+        Number.isFinite(agentMs) && agentMs > 0 ? agentMs : 900000;
     const data = await apiRequest("/api/agent/chat", {
         method: "POST",
         body: JSON.stringify(body),

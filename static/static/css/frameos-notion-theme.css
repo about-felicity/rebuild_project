@@ -1,0 +1,933 @@
+/**
+ * FrameOS「浅纸灰 + 靛紫强调」主题（对齐原 example.html 线框稿视觉）
+ * 在 workflow.css 之后加载，覆盖 token 与关键组件；不改动 JS 与 DOM 契约。
+ */
+
+:root {
+    --bg: #f7f6f3;
+    --fg: #1a1916;
+    --muted: #9b9890;
+    --accent: #4f46e5;
+    --accent2: #4338ca;
+    --accent-neg: #dc2626;
+    --accent-warm: #b45309;
+    --border: #e2dfd9;
+    --border-strong: #ccc9c2;
+    --surface: #ffffff;
+    --surface2: #f2f1ee;
+    --hairline: 1px;
+    --radius: 8px;
+    --sidebar-w: 216px;
+    --agent-sidebar-w: clamp(11rem, 22vw, 220px);
+    /*
+     * UI：Plus Jakarta（拉丁，略圆润、偏 Arc/Notion 类产品感）+ 苹方 / Noto SC（中文清晰，已随 workflow 加载）
+     * Windows 勿再以不存在的 SF Pro 优先，否则易糊成小号 Segoe + 旧雅黑混排。
+     */
+    --font: "Plus Jakarta Sans", "PingFang SC", "Noto Sans SC", "Hiragino Sans GB",
+        "Microsoft YaHei UI", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+    --font-display: var(--font);
+    --font-ui: var(--font);
+    --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, monospace;
+    --notion-shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.06), 0 0 0 1px rgba(0, 0, 0, 0.04);
+    --notion-shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.04);
+    --notion-shadow-md: 0 4px 16px rgba(0, 0, 0, 0.1), 0 0 0 1px rgba(0, 0, 0, 0.04);
+    --notion-shadow-btn: 0 1px 3px rgba(0, 0, 0, 0.12), 0 1px 0 rgba(255, 255, 255, 0.08) inset, 0 0 0 1px rgba(0, 0, 0, 0.1);
+    --notion-accent-glow: 0 2px 8px rgba(79, 70, 229, 0.35), 0 1px 0 rgba(255, 255, 255, 0.2) inset, 0 0 0 1px rgba(79, 70, 229, 0.55);
+}
+
+body {
+    font-size: 0.84375rem; /* 13.5px：略大于原 13px，小字中文更易辨 */
+    line-height: 1.55;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    font-feature-settings: "kern" 1, "liga" 1;
+}
+
+/* ----- 侧栏 ----- */
+.sidebar {
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+}
+
+.logo {
+    padding: 1rem 0.85rem 0.85rem;
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+}
+
+.logo-mark {
+    width: 30px;
+    height: 30px;
+    border-radius: 9px;
+    background: var(--accent);
+    box-shadow: var(--notion-accent-glow);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    color: #fff;
+    font-size: 1rem;
+}
+
+.logo-title {
+    font-family: var(--font-ui);
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: -0.03em;
+    line-height: 1.1;
+}
+
+.logo-badge {
+    margin-left: auto;
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--muted);
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.1rem 0.35rem;
+    letter-spacing: 0.06em;
+}
+
+.nav-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+}
+
+.nav-item {
+    gap: 0.5rem;
+    padding: 0.45rem 0.6rem;
+    border-radius: var(--radius);
+    font-size: 12.5px;
+    letter-spacing: 0;
+    color: color-mix(in oklab, var(--fg) 55%, var(--muted));
+    position: relative;
+}
+
+.nav-item__icon {
+    font-size: 15px;
+    opacity: 0.72;
+    flex-shrink: 0;
+}
+
+.nav-item:hover {
+    background: var(--surface2);
+    color: var(--fg);
+}
+
+.nav-item:hover .nav-item__icon {
+    opacity: 0.95;
+}
+
+.nav-item.active {
+    background: #eef2ff;
+    color: #3730a3;
+    font-weight: 500;
+}
+
+.nav-item.active .nav-item__icon {
+    opacity: 1;
+    color: #3730a3;
+}
+
+.nav-item.active::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 3px;
+    height: 18px;
+    background: var(--accent);
+    border-radius: 0 3px 3px 0;
+}
+
+.project-color {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.85);
+}
+
+.add-project-btn {
+    border-width: 1.5px;
+    border-style: dashed;
+    font-size: 12px;
+    letter-spacing: 0.02em;
+    text-transform: none;
+}
+
+.add-project-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: #eef2ff;
+}
+
+/* ----- 顶栏 Tab ----- */
+.tabbar {
+    height: 42px;
+    padding: 0 14px;
+    gap: 1px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+}
+
+.tab {
+    font-size: 12.5px;
+    letter-spacing: 0;
+    text-transform: none;
+    padding: 5px 11px;
+    border-radius: 6px;
+    border-bottom: none;
+    margin-bottom: 0;
+    font-weight: 400;
+    transition:
+        color 0.24s ease,
+        background-color 0.24s ease,
+        box-shadow 0.24s ease,
+        transform 0.18s ease;
+}
+
+.tab:hover {
+    color: color-mix(in oklab, var(--fg) 55%, var(--muted));
+    background: var(--surface2);
+}
+
+.tab.active {
+    color: var(--fg);
+    background: var(--surface2);
+    font-weight: 500;
+    box-shadow: var(--notion-shadow-xs);
+}
+
+.tab:active {
+    transform: scale(0.97);
+}
+
+.topbar-info {
+    font-size: 11px;
+    letter-spacing: 0.02em;
+    text-transform: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.2rem 0.55rem;
+    border-radius: 999px;
+    background: #eef2ff;
+    border: 1px solid #c7d2fe;
+    color: #3730a3;
+    font-weight: 500;
+}
+
+.topbar-info::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    flex-shrink: 0;
+}
+
+/* ----- Agent ----- */
+.agent-layout {
+    display: grid;
+    grid-template-columns: 1fr minmax(11rem, var(--agent-sidebar-w));
+    grid-template-rows: minmax(0, 1fr);
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.chat-area {
+    border-right: 1px solid var(--border);
+    min-height: 0;
+    min-width: 0;
+}
+
+.chat-toolbar {
+    padding: 0.85rem 1rem;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, #fff 0%, var(--surface2) 100%);
+}
+
+.chat-toolbar-kicker {
+    font-size: 10px;
+    letter-spacing: 0.1em;
+}
+
+.chat-toolbar-title {
+    font-family: var(--font-ui);
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+}
+
+.chat-toolbar-desc {
+    font-size: 11.5px;
+    max-width: 22rem;
+}
+
+.chat-action-btn {
+    font-size: 12.5px;
+    letter-spacing: 0;
+    text-transform: none;
+    border-radius: var(--radius);
+    padding: 0.45rem 0.75rem;
+}
+
+.chat-action-btn--outline {
+    background: var(--surface);
+    color: color-mix(in oklab, var(--fg) 55%, var(--muted));
+    border: 1px solid var(--border);
+    box-shadow: var(--notion-shadow-btn);
+}
+
+.chat-action-btn--outline:hover {
+    background: var(--surface2);
+    color: var(--fg);
+}
+
+.chat-action-btn--solid {
+    border-color: color-mix(in oklab, var(--accent-neg) 45%, var(--border));
+    background: #fef2f2;
+    color: #991b1b;
+    box-shadow: var(--notion-shadow-xs);
+}
+
+.chat-action-btn--solid:hover {
+    background: #fee2e2;
+    opacity: 1;
+}
+
+.chat-messages {
+    gap: 0.55rem;
+    padding: 14px;
+}
+
+.msg {
+    animation: frameosPopIn 0.18s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes frameosPopIn {
+    from {
+        opacity: 0;
+        transform: scale(0.96) translateY(4px);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1) translateY(0);
+    }
+}
+
+.msg-meta {
+    font-size: 10px;
+    letter-spacing: 0.06em;
+}
+
+.msg-bubble {
+    border-radius: 14px;
+    padding: 0.55rem 0.85rem;
+    font-size: 13px;
+    line-height: 1.55;
+    box-shadow: var(--notion-shadow-xs);
+}
+
+.msg.user .msg-bubble {
+    border-radius: 14px 14px 4px 14px;
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+}
+
+.msg.agent .msg-bubble {
+    border-radius: 14px 14px 14px 4px;
+    background: var(--surface);
+    color: var(--fg);
+    border: 1px solid var(--border);
+}
+
+.chat-input-area {
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    padding: 0.85rem 1rem 1rem;
+}
+
+.chat-preset {
+    font-size: 11.5px;
+    letter-spacing: 0;
+    text-transform: none;
+    padding: 3px 9px;
+    border-radius: 999px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: color-mix(in oklab, var(--fg) 45%, var(--muted));
+}
+
+.chat-preset:hover {
+    border-color: #c7d2fe;
+    color: #3730a3;
+    background: #eef2ff;
+}
+
+.chat-input {
+    border-radius: 12px;
+    padding: 9px 12px;
+    font-size: 13px;
+    box-shadow: var(--notion-shadow-xs);
+}
+
+.chat-input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1), var(--notion-shadow-xs);
+}
+
+.send-btn {
+    font-size: 13px;
+    letter-spacing: 0;
+    text-transform: none;
+    padding: 9px 14px;
+    border-radius: 10px;
+    background: var(--accent);
+    color: #fff;
+    box-shadow: var(--notion-accent-glow);
+    align-self: flex-end;
+}
+
+.send-btn:hover {
+    background: #4338ca;
+    opacity: 1;
+    transform: translateY(-1px);
+}
+
+.agent-sidebar {
+    background: var(--bg);
+    gap: 0.65rem;
+    padding: 12px;
+}
+
+.agent-sidebar-section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 11px;
+    box-shadow: var(--notion-shadow-xs);
+    gap: 0.45rem;
+}
+
+.agent-sidebar-section .section-label {
+    border-bottom: none;
+    padding-bottom: 0;
+    margin-bottom: 0.15rem;
+    font-size: 10px;
+    letter-spacing: 0.1em;
+}
+
+.model-select:focus,
+.chat-input:focus {
+    border-color: var(--accent);
+}
+
+.stat-row {
+    font-size: 12px;
+    color: color-mix(in oklab, var(--fg) 45%, var(--muted));
+}
+
+.stat-row span:last-child {
+    color: var(--fg);
+    font-weight: 500;
+}
+
+.sidebar-stack {
+    border-radius: var(--radius);
+    overflow: hidden;
+}
+
+.sidebar-action:hover {
+    background: var(--surface2);
+}
+
+/* ----- 通用按钮 / 表单 ----- */
+.toolbar-btn {
+    font-size: 11.5px;
+    letter-spacing: 0.02em;
+    text-transform: none;
+    border-radius: var(--radius);
+    padding: 0.35rem 0.65rem;
+}
+
+.toolbar-btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    box-shadow: var(--notion-accent-glow);
+}
+
+.toolbar-btn.primary:hover {
+    background: #4338ca;
+    color: #fff;
+}
+
+.analyze-btn {
+    font-size: 13px;
+    letter-spacing: 0.02em;
+    text-transform: none;
+    padding: 0.55rem 1rem;
+    border-radius: var(--radius);
+    background: var(--accent);
+    color: #fff;
+    box-shadow: var(--notion-accent-glow);
+    width: 100%;
+}
+
+.analyze-btn:hover {
+    background: #4338ca;
+    opacity: 1;
+}
+
+.export-btn {
+    border-radius: var(--radius);
+    background: #f0fdf4;
+    border: 1px solid #bbf7d0;
+    color: #14532d;
+    font-size: 12.5px;
+    letter-spacing: 0.02em;
+    text-transform: none;
+}
+
+.export-btn:hover {
+    opacity: 1;
+    background: #dcfce7;
+}
+
+.rev-textarea,
+.rev-select,
+.modal-input,
+.model-select {
+    box-shadow: var(--notion-shadow-xs);
+}
+
+.rev-textarea:focus,
+.rev-select:focus,
+.modal-input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1), var(--notion-shadow-xs);
+}
+
+.output-opt.active {
+    border-color: #c7d2fe;
+    color: #3730a3;
+    background: #eef2ff;
+    font-weight: 500;
+}
+
+.filter-tab.active {
+    background: #eef2ff;
+    border-color: #c7d2fe;
+    color: #3730a3;
+}
+
+/* ----- 弹层 ----- */
+.modal-overlay {
+    background: rgba(15, 14, 13, 0.45);
+    -webkit-backdrop-filter: blur(6px);
+    backdrop-filter: blur(6px);
+}
+
+.modal {
+    border-radius: 16px;
+    padding: 22px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.15), 0 4px 16px rgba(0, 0, 0, 0.1), 0 0 0 1px rgba(0, 0, 0, 0.06);
+    border: 1px solid var(--border);
+}
+
+.modal-title {
+    font-family: var(--font-ui);
+    font-size: 15px;
+    letter-spacing: -0.02em;
+}
+
+.modal-confirm {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    letter-spacing: 0.02em;
+    text-transform: none;
+    font-size: 13px;
+    border-radius: var(--radius);
+    box-shadow: var(--notion-accent-glow);
+}
+
+.modal-confirm:hover {
+    background: #4338ca;
+    opacity: 1;
+}
+
+.modal-cancel {
+    font-size: 13px;
+    letter-spacing: 0.02em;
+    text-transform: none;
+    border-radius: var(--radius);
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: color-mix(in oklab, var(--fg) 45%, var(--muted));
+    box-shadow: var(--notion-shadow-xs);
+}
+
+.color-swatch.active {
+    box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
+}
+
+.data-panel-card:hover::before {
+    background: var(--accent);
+}
+
+/* ----- 滚动条 ----- */
+::-webkit-scrollbar-thumb {
+    background: var(--border);
+}
+
+/* =============================================================================
+ * 以下对齐参考 HTML 中各模块（拼接 / 抖音 / 逆向 / 分镜 / 素材）布局与观感
+ * ============================================================================= */
+
+/* ----- 视频拼接：参考 splice-top（1fr + 230px）、浅色预览槽、底栏 tl-area ----- */
+#panel-splice .splice-layout {
+    display: grid;
+    grid-template-rows: minmax(0, 1fr) auto;
+    min-height: 0;
+}
+
+#panel-splice .splice-preview-area {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 230px;
+    align-items: stretch;
+    min-height: 0;
+}
+
+#panel-splice .sp-preview-column {
+    padding: 0.55rem 0.65rem 0.65rem;
+    min-width: 0;
+}
+
+#panel-splice .sp-player-stage {
+    border-radius: 12px;
+    max-height: min(56vh, 520px);
+    box-shadow: var(--notion-shadow-md);
+}
+
+#panel-splice .sp-player-chrome {
+    background: var(--surface);
+    padding: 0.5rem 0.75rem;
+}
+
+#panel-splice .sp-player-chrome-dots i:nth-child(1) {
+    background: #ff5f57;
+}
+
+#panel-splice .sp-player-chrome-dots i:nth-child(2) {
+    background: #ffbd2e;
+}
+
+#panel-splice .sp-player-chrome-dots i:nth-child(3) {
+    background: #28ca41;
+}
+
+#panel-splice .sp-player-chrome-title {
+    font-size: 11.5px;
+    letter-spacing: 0.02em;
+    text-transform: none;
+    font-weight: 500;
+    color: color-mix(in oklab, var(--muted) 88%, var(--fg));
+}
+
+#panel-splice .sp-player-chrome-badge {
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    background: #eceae5;
+    color: color-mix(in oklab, var(--muted) 85%, var(--fg));
+}
+
+#panel-splice .sp-player-viewport {
+    margin: 0.5rem 0.65rem 0.65rem;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.04);
+    aspect-ratio: unset;
+    min-height: 200px;
+    max-height: min(42vh, 380px);
+}
+
+#panel-splice .sp-player-placeholder-title {
+    font-family: var(--font-ui);
+    color: var(--fg);
+    opacity: 0.95;
+}
+
+#panel-splice .sp-player-placeholder-hint {
+    color: var(--muted);
+    opacity: 0.92;
+}
+
+#panel-splice .sp-player-placeholder-icon {
+    background: var(--surface2);
+    color: var(--muted);
+}
+
+#panel-splice .sp-player-video {
+    border-radius: 6px;
+}
+
+.splice-clip-tray {
+    width: 230px;
+    min-width: 230px;
+}
+
+#panel-splice .tray-header {
+    padding: 0.55rem 0.75rem;
+    font-size: 11.5px;
+    letter-spacing: 0.03em;
+    text-transform: none;
+    font-weight: 500;
+    color: var(--muted);
+}
+
+#panel-splice .timeline-area {
+    background: var(--surface);
+}
+
+#panel-splice .timeline-toolbar {
+    padding: 0.55rem 0.85rem;
+    gap: 0.4rem;
+}
+
+#panel-splice .timeline-label {
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: none;
+    color: color-mix(in oklab, var(--fg) 52%, var(--muted));
+}
+
+#panel-splice .timeline-scroll {
+    padding: 0.45rem 0.85rem 0.55rem;
+}
+
+#panel-splice .timeline-track {
+    height: auto;
+    min-height: 56px;
+    align-items: center;
+}
+
+#panel-splice .tl-track-label {
+    width: 44px;
+    padding-right: 6px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+}
+
+#panel-splice .tl-clips-row {
+    flex: 1;
+    min-height: 44px;
+    height: auto;
+    padding: 0 0.65rem;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.04);
+    gap: 0.35rem;
+}
+
+#panel-splice .tl-add-zone {
+    font-size: 11.5px;
+    letter-spacing: 0.01em;
+    text-transform: none;
+    transition: color 0.15s ease;
+}
+
+#panel-splice .tl-add-zone:hover {
+    color: var(--accent);
+}
+
+#panel-splice .timeline-settings {
+    padding: 0.45rem 0.85rem 0.6rem;
+    gap: 0.45rem;
+    border-top: 1px solid var(--border);
+}
+
+#panel-splice .setting-label {
+    font-size: 11.5px;
+    letter-spacing: 0.01em;
+    text-transform: none;
+    color: var(--muted);
+}
+
+#panel-splice .setting-select {
+    font-size: 11.5px;
+    padding: 0.35rem 0.5rem;
+    box-shadow: var(--notion-shadow-xs);
+}
+
+#panel-splice .sp-transport {
+    background: var(--surface2);
+}
+
+@media (max-width: 960px) {
+    #panel-splice .splice-preview-area {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto auto;
+    }
+
+    .splice-clip-tray {
+        width: 100%;
+        min-width: 0;
+        max-height: min(38vh, 280px);
+        border-left: none;
+        border-top: 1px solid var(--border);
+    }
+}
+
+/* ----- 抖音：参考 player-card 浅色 chrome + 浅预览底 ----- */
+#panel-douyin .dy-player-chrome {
+    background: var(--surface2);
+}
+
+#panel-douyin .dy-player-chrome-dots i:nth-child(1) {
+    background: #ff5f57;
+}
+
+#panel-douyin .dy-player-chrome-dots i:nth-child(2) {
+    background: #ffbd2e;
+}
+
+#panel-douyin .dy-player-chrome-dots i:nth-child(3) {
+    background: #28ca41;
+}
+
+#panel-douyin .dy-player-chrome-title {
+    font-size: 11.5px;
+    letter-spacing: 0.02em;
+    text-transform: none;
+    font-weight: 500;
+    color: color-mix(in oklab, var(--muted) 88%, var(--fg));
+}
+
+#panel-douyin .dy-player-chrome-badge {
+    background: #eceae5;
+    font-size: 10px;
+    letter-spacing: 0.04em;
+}
+
+#panel-douyin .dy-player-viewport {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+#panel-douyin .douyin-preview-body {
+    background: var(--bg);
+}
+
+#panel-douyin .dy-player-stage {
+    box-shadow: var(--notion-shadow-md);
+    border-radius: 12px;
+}
+
+/* ----- 逆向：参考 rev-layout 左栏宽度 + out-bar ----- */
+#panel-reverse .reverse-input-col {
+    width: min(100%, 300px);
+    min-width: min(100%, 260px);
+}
+
+#panel-reverse .json-toolbar {
+    padding: 0.55rem 0.85rem;
+    background: var(--surface);
+    gap: 0.45rem;
+}
+
+#panel-reverse .json-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: none;
+    color: color-mix(in oklab, var(--fg) 48%, var(--muted));
+}
+
+#panel-reverse .json-status.idle {
+    border-radius: 999px;
+    font-size: 11px;
+    padding: 0.15rem 0.55rem;
+}
+
+#panel-reverse .json-view-tab {
+    font-size: 11.5px;
+    letter-spacing: 0.02em;
+    text-transform: none;
+    border-radius: 6px;
+    padding: 0.25rem 0.55rem;
+}
+
+#panel-reverse .json-view-tab.active {
+    background: var(--surface2);
+    color: var(--fg);
+    border-color: var(--border);
+    box-shadow: var(--notion-shadow-xs);
+}
+
+/* ----- 分镜流水线：参考 sb-layout 左栏 ----- */
+#panel-storyboard .storyboard-form-col {
+    width: min(100%, 320px);
+    min-width: min(100%, 260px);
+}
+
+#panel-storyboard .storyboard-progress-head {
+    padding: 0.55rem 0.85rem;
+    background: var(--surface);
+}
+
+#panel-storyboard .storyboard-progress-log {
+    font-size: 12px;
+    background: var(--bg);
+}
+
+/* ----- 素材库：参考 media-bar ----- */
+#panel-project .media-toolbar-title {
+    font-family: var(--font-ui);
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+}
+
+#panel-project .media-toolbar {
+    padding: 0.55rem 0.85rem;
+    background: var(--surface);
+}
+
+#panel-project .filter-tab {
+    font-size: 11.5px;
+    letter-spacing: 0.02em;
+    text-transform: none;
+    border-radius: 999px;
+    padding: 0.25rem 0.55rem;
+}
+
+/* 窄屏：保持 workflow 纵向 agent 布局时侧栏卡片仍可读 */
+@media (max-width: 1100px) {
+    .agent-layout {
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        min-height: 0;
+        overflow: hidden;
+    }
+
+    .chat-area {
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        flex: 1;
+        min-height: 0;
+    }
+}

@@ -11,18 +11,20 @@
 - ``destination_to_app_library(dest) -> str``：``storyboard_library`` → ``storyboard``，其余合法 destination → ``asset``。
 - ``persist_image_tool_output(...)``：展示名 ``{摘要}_{文件主名六位}``；分镜库首条入库时返回镜像素材库所需字段，否则 ``None``（镜像在视频开始时写入）。
 - ``insert_storyboard_asset_library_mirror(...)``：视频开始生成时把分镜图写入「素材库」。
-- ``persist_video_tool_output(..., summary_base=...) -> None``：无返回；规则同上。
+- ``persist_video_tool_output(..., summary_base=..., video_prompt=...) -> None``：无返回；在 Agent 会话内优先用「本轮写入模型的完整 user 文本」+ ``_`` + ``YYYYMMDD_HHMMSS`` 作展示名，否则退化为 ``video_prompt`` 或 ``{摘要}_{六位}``。
 """
 
 from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from typing import Any
 from urllib.parse import urlparse
 
 from data.db import insert_project_asset
 from data.media_mirror import mirror_http_url_to_local
+from runtime_ctx import agent_chat_user_message_for_model
 
 
 def _sanitize_summary_text(s: str, max_len: int = 36) -> str:
@@ -31,6 +33,16 @@ def _sanitize_summary_text(s: str, max_len: int = 36) -> str:
     if len(t) > max_len:
         t = t[: max_len - 1] + "…"
     return t or "图"
+
+
+def _sanitize_full_asset_name_text(s: str) -> str:
+    """去掉路径非法字符与控制符；**不按长度截断**，保留发给 Agent 的全文。"""
+    t = (s or "").strip()
+    t = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", t)
+    t = re.sub(r'[<>:"/\\|?*]', "", t)
+    t = re.sub(r"[\t\r\n]+", " ", t)
+    t = re.sub(r" +", " ", t).strip()
+    return t
 
 
 def _stem6_from_stored_uri(stored: str) -> str:
@@ -156,10 +168,13 @@ def persist_video_tool_output(
     result_text: str,
     *,
     summary_base: str = "",
+    video_prompt: str = "",
 ) -> None:
     """
     **接受**：``run_generate_video`` 返回的 JSON 字符串（含业务错误或成功列表）。
-    **写出**：``library=video``；展示名 ``{摘要}_{文件主名六位}``。
+    **写出**：``library=video``；展示名：在 Agent 会话内为
+    ``{本轮写入模型的完整 user 文本（仅去非法字符）}_{YYYYMMDD_HHMMSS}``；
+    否则若有 ``video_prompt`` 则同格式；否则 ``{摘要}_{文件主名六位}``。
     """
     try:
         data = json.loads(result_text)
@@ -172,7 +187,23 @@ def persist_video_tool_output(
     created = data.get("created_asset_ids") or []
     if not created:
         return
-    summary = _sanitize_summary_text(summary_base or "视频", max_len=32)
+
+    time_s = datetime.now().strftime("%Y%m%d_%H%M%S")
+    full_agent = (agent_chat_user_message_for_model.get() or "").strip()
+    vp = (video_prompt or "").strip()
+
+    if full_agent:
+        base = _sanitize_full_asset_name_text(full_agent)
+        fixed_display = f"{base}_{time_s}" if base else f"视频_{time_s}"
+        use_fixed = True
+    elif vp:
+        base = _sanitize_full_asset_name_text(vp)
+        fixed_display = f"{base}_{time_s}" if base else f"视频_{time_s}"
+        use_fixed = True
+    else:
+        use_fixed = False
+        summary = _sanitize_summary_text(summary_base or "视频", max_len=32)
+
     for item in created:
         uri = str(item).strip()
         local = mirror_http_url_to_local(project_id, uri)
@@ -184,7 +215,7 @@ def persist_video_tool_output(
             if k in data and data.get(k) is not None:
                 meta[k] = data[k]
         stem6 = _stem6_from_stored_uri(stored)
-        display_name = f"{summary}_{stem6}"
+        display_name = fixed_display if use_fixed else f"{summary}_{stem6}"
         insert_project_asset(
             project_id,
             "video",

@@ -26,8 +26,8 @@ export const CONFIG = {
     USE_MOCK_API: false,
     /** 全局 HTTP 默认超时 ms（非 Agent 的短请求也会用；不宜过小） */
     REQUEST_TIMEOUT_MS: 120000,
-    /** Agent /api/agent/chat 单轮超时（含图生视频任务轮询，须 ≥ 服务端等待） */
-    AGENT_CHAT_TIMEOUT_MS: 300000,
+    /** Agent /api/agent/chat 单轮超时（含分镜生图 + Ark 图生视频轮询；须 ≥ 服务端 wait） */
+    AGENT_CHAT_TIMEOUT_MS: 900000,
     /**
      * 首屏/切换项目时拉会话与素材列表的超时（须明显短于 REQUEST_TIMEOUT_MS），
      * 避免后端不可达时整页卡在「加载」态两分钟。

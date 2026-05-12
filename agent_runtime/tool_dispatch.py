@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 from tool.generation_tools import run_generate_image, run_generate_video
@@ -32,6 +33,18 @@ from agent_runtime.persist import (
 )
 
 TOOL_SESSION = None
+
+
+def _agent_ark_video_wait_timeout_sec() -> int:
+    """Agent ``generate_video_clip`` 轮询方舟任务的最长等待；默认 600s，与前端 AGENT_CHAT_TIMEOUT_MS 留余量。"""
+    raw = (os.environ.get("ARK_VIDEO_WAIT_TIMEOUT_SEC") or "").strip()
+    if raw:
+        try:
+            v = int(raw)
+            return max(60, min(v, 3600))
+        except ValueError:
+            pass
+    return 600
 
 
 def _row_destination(row: dict[str, Any]) -> str:
@@ -86,6 +99,11 @@ def _deduped_chat_ref_uris() -> list[str]:
         seen.add(u)
         out.append(u)
     return out
+
+
+def count_deduped_chat_video_ref_uris() -> int:
+    """本轮可作首帧的引用图数量（去重 URI）；供 ``video_guard`` 判断是否必须先分镜。"""
+    return len(_deduped_chat_ref_uris())
 
 
 def _dedupe_str_list(xs: list[str]) -> list[str]:
@@ -224,12 +242,18 @@ def collect_tool_results(assistant_content: list) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
 
     for block in assistant_content:
-        if getattr(block, "type", None) != "tool_use":
-            continue
-
-        tid = block.id
-        name = getattr(block, "name", "") or ""
-        raw = getattr(block, "input", None)
+        if isinstance(block, dict):
+            if block.get("type") != "tool_use":
+                continue
+            tid = str(block.get("id") or block.get("tool_use_id") or "")
+            name = str(block.get("name") or "")
+            raw = block.get("input")
+        else:
+            if getattr(block, "type", None) != "tool_use":
+                continue
+            tid = str(getattr(block, "id", "") or "")
+            name = getattr(block, "name", "") or ""
+            raw = getattr(block, "input", None)
         inp: dict[str, Any] = raw if isinstance(raw, dict) else {}
 
         if not pid:
@@ -384,6 +408,7 @@ def collect_tool_results(assistant_content: list) -> list[dict[str, Any]]:
                     camera_move=str(inp.get("camera_move", "static") or "static"),
                     video_title=str(inp.get("video_title", "") or ""),
                     reference_image_urls=refs_in or None,
+                    wait_timeout_seconds=_agent_ark_video_wait_timeout_sec(),
                 )
                 try:
                     data = json.loads(text)
@@ -392,6 +417,7 @@ def collect_tool_results(assistant_content: list) -> list[dict[str, Any]]:
                             pid,
                             text,
                             summary_base=_video_tool_summary_label(inp),
+                            video_prompt=str(inp.get("prompt", "") or ""),
                         )
                 except json.JSONDecodeError:
                     pass

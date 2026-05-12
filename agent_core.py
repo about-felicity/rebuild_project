@@ -42,6 +42,12 @@ from agent_runtime.abstract_agent_mode import (
 from agent_runtime.messages import extract_last_assistant_text
 from agent_runtime.tool_dispatch import collect_tool_results
 from agent_runtime.tools_spec import SYSTEM, TOOLS
+from agent_runtime.video_guard import (
+    build_forced_video_tool_round,
+    last_plain_string_user_message,
+    tool_results_include_successful_video,
+    user_demands_video_clip,
+)
 
 load_dotenv(override=True)
 
@@ -177,6 +183,7 @@ def agent_loop(hist: list[dict[str, Any]], agent_mode: str = "normal") -> None:
 """
     n_round = 0
     system_text = _system_for_agent_mode(agent_mode)
+    video_guard_used = False
     while True:
         n_round += 1
         if n_round > _MAX_TOOL_ROUNDS:
@@ -204,13 +211,46 @@ def agent_loop(hist: list[dict[str, Any]], agent_mode: str = "normal") -> None:
         ):
             create_kwargs["tools"] = TOOLS
         response = _messages_create_with_retries(**create_kwargs)
-        hist.append({"role": "assistant", "content": response.content})
 
         if response.stop_reason != "tool_use":
+            anchor = last_plain_string_user_message(hist)
+            pack = None
+            if (
+                TOOLS
+                and anchor
+                and user_demands_video_clip(anchor)
+                and not video_guard_used
+            ):
+                pack = build_forced_video_tool_round(hist)
+            if pack:
+                ablocks, tres = pack
+                hist.append({"role": "assistant", "content": ablocks})
+                hist.append({"role": "user", "content": tres})
+                video_guard_used = True
+                continue
+            hist.append({"role": "assistant", "content": response.content})
             return
+
+        hist.append({"role": "assistant", "content": response.content})
 
         results = collect_tool_results(response.content)
         if not results:
             return
 
         hist.append({"role": "user", "content": results})
+
+        anchor = last_plain_string_user_message(hist)
+        if (
+            TOOLS
+            and anchor
+            and user_demands_video_clip(anchor)
+            and not tool_results_include_successful_video(results)
+            and not video_guard_used
+        ):
+            pack2 = build_forced_video_tool_round(hist)
+            if pack2:
+                ab2, tr2 = pack2
+                hist.append({"role": "assistant", "content": ab2})
+                hist.append({"role": "user", "content": tr2})
+                video_guard_used = True
+                continue

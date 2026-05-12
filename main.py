@@ -25,6 +25,7 @@ from agent_runtime.messages import strip_markdown_images
 from agent_runtime.reply_policy import apply_assistant_reply_policy, extract_generation_tool_trace
 from agent_runtime.chat_augment import augment_message_for_model
 from runtime_ctx import (
+    agent_chat_user_message_for_model,
     agent_chat_video_ref_stack,
     agent_last_storyboard_uri,
     agent_pending_storyboard_asset_mirror,
@@ -384,6 +385,7 @@ async def agent_chat(body: ChatBody) -> ChatResponse:
         t_vid = agent_chat_video_ref_stack.set(video_ref_rows)
         t_sb = agent_last_storyboard_uri.set(None)
         t_mirr = agent_pending_storyboard_asset_mirror.set(None)
+        t_um = agent_chat_user_message_for_model.set(user_for_model)
         try:
             agent_loop(hist, mode)
         finally:
@@ -391,6 +393,7 @@ async def agent_chat(body: ChatBody) -> ChatResponse:
             agent_last_storyboard_uri.reset(t_sb)
             agent_chat_video_ref_stack.reset(t_vid)
             agent_project_id_ctx.reset(t_pid)
+            agent_chat_user_message_for_model.reset(t_um)
 
     try:
         await asyncio.to_thread(_run_agent_in_worker)

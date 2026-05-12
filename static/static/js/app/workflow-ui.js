@@ -159,9 +159,37 @@ const SERVER_ASSET_ID_BASE = 2_000_000_000;
 /** 与 ``data.db.FRAMEOS_SHARED_PROJECT_ID`` 一致；合并进各项目的公共产品图不可单条删除 */
 const FRAMEOS_SHARED_PROJECT_ID = "__frameos_shared__";
 
+/**
+ * 以本次 GET /assets 返回为准：去掉「本地 localStorage 仍记着、但服务端已无该行」的素材。
+ * 否则换浏览器后正常、同一浏览器却长期看到「以前上传过」的幽灵缩略图（与主机素材库不一致）。
+ * 保留：上传中 _uploadPending、未落库的 _blobPending、尚无 _serverAssetId 的纯本地项。
+ */
+function pruneProjectMediaNotOnServer(project, serverRows) {
+    if (!project || !Array.isArray(project.media)) return;
+    const rows = Array.isArray(serverRows) ? serverRows : [];
+    const serverIds = new Set();
+    for (const r of rows) {
+        if (!r || typeof r !== "object") continue;
+        const sid = Number(r.id);
+        if (Number.isFinite(sid)) serverIds.add(sid);
+    }
+    project.media = project.media.filter((m) => {
+        if (!m || typeof m !== "object") return false;
+        if (m._uploadPending) return true;
+        if (m._blobPending) return true;
+        const sid = Number(m._serverAssetId);
+        if (!Number.isFinite(sid)) return true;
+        return serverIds.has(sid);
+    });
+}
+
 function mergeServerAssetsIntoProject(project, rows) {
-    if (!project || !Array.isArray(rows) || rows.length === 0) return;
+    if (!project || !Array.isArray(rows)) return;
     if (!Array.isArray(project.media)) project.media = [];
+    if (rows.length === 0) {
+        migrateProjectMediaLibraries(project);
+        return;
+    }
     const seen = new Set(
         project.media.filter((m) => m._serverAssetId != null).map((m) => Number(m._serverAssetId)),
     );
@@ -238,6 +266,15 @@ function mergeServerAssetsIntoProject(project, rows) {
     migrateProjectMediaLibraries(project);
 }
 
+/** 先按服务端列表修剪幽灵素材，再合并/更新字段（rows 可为空数组） */
+function syncProjectMediaWithServerRows(project, rows) {
+    if (!project) return;
+    const safeRows = Array.isArray(rows) ? rows : [];
+    if (!Array.isArray(project.media)) project.media = [];
+    pruneProjectMediaNotOnServer(project, safeRows);
+    mergeServerAssetsIntoProject(project, safeRows);
+}
+
 /** Agent 对话成功后拉取服务端「本项素材」并合并进当前项目（后端实现 GET /api/projects/:id/assets 后生效） */
 async function refreshServerAssetsForActiveProject() {
     if (!state.activeProject) return;
@@ -250,7 +287,7 @@ async function refreshServerAssetsForProject(project) {
     const pid = String(project.id);
     try {
         const rows = await fetchProjectAssets(pid);
-        if (!Array.isArray(rows) || rows.length === 0) return;
+        const safeRows = Array.isArray(rows) ? rows : [];
 
         // 必须与侧边栏数组中的项合并为同一引用；否则仅 merge 传入的 orphan 对象，activeProject.media 不更新，网格一直不显示新分镜/视频。
         let p = state.projects.find((x) => String(x.id) === pid);
@@ -265,8 +302,7 @@ async function refreshServerAssetsForProject(project) {
                 state.projects.push(p);
             }
         }
-        mergeServerAssetsIntoProject(p, rows);
-        migrateProjectMediaLibraries(p);
+        syncProjectMediaWithServerRows(p, safeRows);
         saveProjectsToStorage();
         if (state.activeProject && String(state.activeProject.id) === pid) {
             state.activeProject = p;
@@ -948,9 +984,9 @@ async function selectProject(p) {
         const assetRes = settled[1];
         if (assetRes.status === "fulfilled") {
             const assetsRaw = assetRes.value;
-            if (Array.isArray(assetsRaw) && assetsRaw.length > 0 && state.activeProject) {
-                mergeServerAssetsIntoProject(state.activeProject, assetsRaw);
-                migrateProjectMediaLibraries(state.activeProject);
+            const safeRows = Array.isArray(assetsRaw) ? assetsRaw : [];
+            if (state.activeProject) {
+                syncProjectMediaWithServerRows(state.activeProject, safeRows);
                 saveProjectsToStorage();
                 setTopbarInfo(
                     state.activeProject.name + " · " + projectMediaCount(state.activeProject) + " 个素材",
@@ -1781,6 +1817,16 @@ function renderMediaGrid(media) {
     media.forEach(m => {
         const isSelected = state.selectedMedia && state.selectedMedia.id === m.id;
         const t = m.type || 'image';
+        const sid = Number(m._serverAssetId);
+        const hasSid = Number.isFinite(sid) && sid > 0;
+        let idLine = "";
+        if (hasSid) {
+            idLine = `<div class="media-server-id">服务器 id ${sid}</div>`;
+        } else if (m._uploadPending) {
+            idLine = `<div class="media-server-id media-server-id--pending">服务器 id — · 上传中</div>`;
+        } else {
+            idLine = `<div class="media-server-id media-server-id--local">服务器 id —（未入库）</div>`;
+        }
         html += `<div class="media-card ${isSelected ? 'selected' : ''}" data-media-id="${escAttr(String(m.id))}" onclick="selectMedia(${m.id})" ondblclick="openMediaDetail(${m.id})">
       <div class="media-thumb">
 ${mediaThumbInnerHtml(m)}
@@ -1793,6 +1839,7 @@ ${mediaCheckSlotHtml(m)}
       <div class="media-info">
 <div class="media-name" title="${m.name}">${m.name}</div>
 <div class="media-meta">${m.size || '—'} ${m.res || m.dur || ''}</div>
+${idLine}
       </div>
     </div>`;
     });
@@ -1835,6 +1882,17 @@ function openMediaDetail(id) {
         ['文件名', m.name],
         ['大小', m.size || '—'],
     ];
+    {
+        const sid = Number(m._serverAssetId);
+        rows.push([
+            '服务器 id',
+            Number.isFinite(sid) && sid > 0
+                ? String(sid)
+                : m._uploadPending
+                  ? '—（上传中）'
+                  : '—（未入库，仅本地）',
+        ]);
+    }
     if (m.dur) rows.push(['时长', m.dur]);
     if (m.res) rows.push(['分辨率', m.res]);
     if (t === "storyboard" && m.shotCount != null && Number.isFinite(Number(m.shotCount))) {
@@ -2713,12 +2771,18 @@ async function sendChatMessage() {
     } catch (err) {
         const isAbort = err && err.name === "AbortError";
         const agentTo = Number(CONFIG.AGENT_CHAT_TIMEOUT_MS);
-        const abortSec = Number.isFinite(agentTo) && agentTo > 0 ? agentTo : 300000;
+        const abortMs =
+            Number.isFinite(agentTo) && agentTo > 0 ? agentTo : 900000;
+        const sec = Math.round(abortMs / 1000);
+        const timeHint =
+            sec >= 120
+                ? "约 " + String(Math.round(sec / 60)) + " 分钟（" + String(sec) + " 秒）"
+                : "约 " + String(sec) + " 秒";
         appendMessageForProject(
             projectId,
             "agent",
             isAbort
-                ? "请求超时（约 " + String(Math.round(abortSec / 1000)) + " 秒无响应），请重试。"
+                ? "请求超时（" + timeHint + "无响应），请重试。"
                 : "请求失败：" + (err && err.message ? err.message : String(err)),
         );
         updateStats();

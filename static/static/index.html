@@ -13,7 +13,9 @@
     </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FrameOS — 视频工作流</title>
-    <link rel="stylesheet" href="css/workflow.css?v=35">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.19.0/dist/tabler-icons.min.css">
+    <link rel="stylesheet" href="css/workflow.css?v=40">
+    <link rel="stylesheet" href="css/frameos-notion-theme.css?v=6">
 </head>
 
 <body>
@@ -31,29 +33,30 @@
         <!-- SIDEBAR -->
         <aside class="sidebar">
             <div class="logo">
+                <span class="logo-mark" aria-hidden="true"><i class="ti ti-aperture"></i></span>
                 <span class="logo-title">FrameOS</span>
                 <span class="logo-badge">v0.1</span>
             </div>
 
             <nav class="nav-section">
                 <div class="nav-label">模块</div>
-                <button class="nav-item active" onclick="switchTab('agent')">
-                    <span class="nav-dot"></span> Agent 对话
+                <button type="button" class="nav-item active" onclick="switchTab('agent')">
+                    <i class="ti ti-message-2 nav-item__icon" aria-hidden="true"></i> Agent 对话
                 </button>
-                <button class="nav-item" onclick="switchTab('project')">
-                    <span class="nav-dot"></span> 项目素材
+                <button type="button" class="nav-item" onclick="switchTab('project')">
+                    <i class="ti ti-layout-grid nav-item__icon" aria-hidden="true"></i> 项目素材
                 </button>
-                <button class="nav-item" onclick="switchTab('reverse')">
-                    <span class="nav-dot"></span> 逆向提示词
+                <button type="button" class="nav-item" onclick="switchTab('reverse')">
+                    <i class="ti ti-wand nav-item__icon" aria-hidden="true"></i> 逆向提示词
                 </button>
-                <button class="nav-item" onclick="switchTab('douyin')">
-                    <span class="nav-dot"></span> 抖音视频
+                <button type="button" class="nav-item" onclick="switchTab('douyin')">
+                    <i class="ti ti-brand-tiktok nav-item__icon" aria-hidden="true"></i> 抖音视频
                 </button>
-                <button class="nav-item" onclick="switchTab('storyboard')">
-                    <span class="nav-dot"></span> 分镜流水线
+                <button type="button" class="nav-item" onclick="switchTab('storyboard')">
+                    <i class="ti ti-photo-video nav-item__icon" aria-hidden="true"></i> 分镜流水线
                 </button>
-                <button class="nav-item" onclick="switchTab('splice')">
-                    <span class="nav-dot"></span> 视频拼接
+                <button type="button" class="nav-item" onclick="switchTab('splice')">
+                    <i class="ti ti-cut nav-item__icon" aria-hidden="true"></i> 视频拼接
                 </button>
             </nav>
 
@@ -691,7 +694,7 @@
             <div class="modal-field">
                 <label class="modal-label">项目颜色</label>
                 <div class="color-swatches" id="color-swatches">
-                    <div class="color-swatch active" style="background:#3a6e00;" data-color="#3a6e00"
+                    <div class="color-swatch active" style="background:#4F46E5;" data-color="#4F46E5"
                         onclick="selectColor(this)"></div>
                     <div class="color-swatch" style="background:#005a8a;" data-color="#005a8a"
                         onclick="selectColor(this)"></div>
@@ -779,7 +782,7 @@
         </figure>
     </div>
 
-    <script type="module" src="js/main.js?v=35"></script>
+    <script type="module" src="js/main.js?v=42"></script>
 </body>
 
 </html>

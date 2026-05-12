@@ -15,6 +15,12 @@ agent_last_storyboard_uri: ContextVar[str | None] = ContextVar(
     default=None,
 )
 
+# 本轮 POST /api/agent/chat 写入 hist 的完整 user 文本（含引用块、系统拼接），供视频入库展示名等使用。
+agent_chat_user_message_for_model: ContextVar[str | None] = ContextVar(
+    "agent_chat_user_message_for_model",
+    default=None,
+)
+
 # 分镜已写入「分镜库」后、待「视频开始生成」时再镜像到「素材库」的元数据（同一线程内消费一次）。
 agent_pending_storyboard_asset_mirror: ContextVar[dict[str, Any] | None] = (
     ContextVar("agent_pending_storyboard_asset_mirror", default=None)

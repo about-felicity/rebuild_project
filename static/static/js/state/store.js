@@ -9,7 +9,7 @@ export const state = {
     timeline: [],
     /** 时间轴上当前选中的片段索引（用于预览播放 / 上一段下一段） */
     timelineSelectedIndex: 0,
-    selectedColor: "#3a6e00",
+    selectedColor: "#4F46E5",
     /** 按项目 id 隔离的 Agent 对话：{ [projectId: string]: Array<{ role: 'user'|'agent', text: string }> } */
     agentThreads: {},
     /** 哪一项目正等待 Agent 回复（用于切回项目时还原「正在输入」） */
