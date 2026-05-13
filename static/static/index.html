@@ -206,6 +206,8 @@
                             <div class="toolbar-spacer"></div>
                             <span class="media-bulk-toolbar-hint" id="library-bulk-count" aria-live="polite"></span>
                             <button type="button" class="toolbar-btn" onclick="selectAllVisibleVideosInLibrary()" title="勾选当前列表中全部可播放的视频">全选视频</button>
+                            <button type="button" class="toolbar-btn" onclick="selectAllVisibleDownloadableInLibrary()" title="勾选当前列表中全部可走服务器下载的素材（/media 路径）">全选可下载</button>
+                            <button type="button" class="toolbar-btn" onclick="void downloadBulkSelectedMediaAsZip()" title="将勾选素材打包为 ZIP；包内文件名与卡片上的名称一致（重名自动加后缀）">批量下载</button>
                             <button type="button" class="toolbar-btn" onclick="clearLibraryBulkSelection()" title="清除素材库中的批量勾选">清除勾选</button>
                             <button type="button" class="toolbar-btn primary" onclick="addBulkSelectedVideosToTimelineAndGoSplice()" title="将勾选的视频加入拼接时间轴并打开拼接页">选中入轨并拼接</button>
                             <button type="button" class="toolbar-btn"
@@ -455,7 +457,7 @@
                                     <button type="button" class="toolbar-btn" onclick="document.getElementById('sb-product-images').click()">本地上传</button>
                                     <input type="file" id="sb-product-images" accept="image/jpeg,image/png,image/webp,image/gif" multiple hidden onchange="onStoryboardLocalFilesPicked(event)">
                                 </div>
-                                <p class="storyboard-hint">可从当前项目<strong>素材库</strong>勾选栅格图片，或本地上传；合计 1–3 张。Vision 会读<strong>全部</strong>图做策划；万相生图<strong>只锁一张</strong>产品外观，默认由 Step0 从多张里识别「包装/瓶身」主图（人物/场景图勿放在第一位更易判对）。</p>
+                                <p class="storyboard-hint">可从当前项目<strong>素材库</strong>勾选栅格图片，或本地上传；合计 1–3 张。Vision 会读<strong>全部</strong>图做策划；Step0 会识别<strong>产品主图</strong>、可选<strong>人物</strong>与<strong>场景/背景</strong>；逐镜生图（Seedream/万相）按「人物→产品→背景」传参考（缺类则省略）。产品棚拍勿放在第一位更易判对。</p>
                             </div>
                             <div class="rev-field">
                                 <label class="rev-label" for="sb-wan-ref-index">万相参考图（可选）</label>
@@ -782,7 +784,8 @@
         </figure>
     </div>
 
-    <script type="module" src="js/main.js?v=42"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js" crossorigin="anonymous"></script>
+    <script type="module" src="js/main.js?v=44"></script>
 </body>
 
 </html>

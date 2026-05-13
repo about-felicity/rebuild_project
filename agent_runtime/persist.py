@@ -11,7 +11,7 @@
 - ``destination_to_app_library(dest) -> str``：``storyboard_library`` → ``storyboard``，其余合法 destination → ``asset``。
 - ``persist_image_tool_output(...)``：展示名 ``{摘要}_{文件主名六位}``；分镜库首条入库时返回镜像素材库所需字段，否则 ``None``（镜像在视频开始时写入）。
 - ``insert_storyboard_asset_library_mirror(...)``：视频开始生成时把分镜图写入「素材库」。
-- ``persist_video_tool_output(..., summary_base=..., video_prompt=...) -> None``：无返回；在 Agent 会话内优先用「本轮写入模型的完整 user 文本」+ ``_`` + ``YYYYMMDD_HHMMSS`` 作展示名，否则退化为 ``video_prompt`` 或 ``{摘要}_{六位}``。
+- ``persist_video_tool_output(..., summary_base=..., video_prompt=...) -> None``：无返回；视频库展示名优先取「【用户原文】」段，去掉前端追加的「（已引用…）」脚注，**不**再拼 ``_YYYYMMDD_HHMMSS``；过长截断；无可用文本时退化为 ``video_prompt`` 或 ``{摘要}_{六位}``。
 """
 
 from __future__ import annotations
@@ -43,6 +43,34 @@ def _sanitize_full_asset_name_text(s: str) -> str:
     t = re.sub(r"[\t\r\n]+", " ", t)
     t = re.sub(r" +", " ", t).strip()
     return t
+
+
+# 前端 workflow-ui 发送 Agent 时在文末追加，便于解析 asset_id；视频库展示名应剔除。
+_REF_NOTE_TAIL_RE = re.compile(r"\s*（已引用\s*\d+\s*张[^）]*）\s*$", re.DOTALL)
+
+_TS_SUFFIX_RE = re.compile(r"_\d{8}_\d{6}\s*$")
+
+_MAX_VIDEO_DISPLAY_NAME_CHARS = 200
+
+
+def _user_plain_for_video_display_name(full_model_user: str) -> str:
+    """从发往模型的整段 user 中取出「用户原文」并去掉引用脚注与误拼的时间后缀。"""
+    t = (full_model_user or "").strip()
+    if not t:
+        return ""
+    mk = "【用户原文】"
+    if mk in t:
+        t = t.split(mk, 1)[-1].strip()
+    t = _REF_NOTE_TAIL_RE.sub("", t).strip()
+    t = _TS_SUFFIX_RE.sub("", t).strip()
+    return t
+
+
+def _clip_video_display_name(s: str, max_len: int = _MAX_VIDEO_DISPLAY_NAME_CHARS) -> str:
+    u = (s or "").strip()
+    if len(u) <= max_len:
+        return u
+    return u[: max_len - 1] + "…"
 
 
 def _stem6_from_stored_uri(stored: str) -> str:
@@ -172,9 +200,8 @@ def persist_video_tool_output(
 ) -> None:
     """
     **接受**：``run_generate_video`` 返回的 JSON 字符串（含业务错误或成功列表）。
-    **写出**：``library=video``；展示名：在 Agent 会话内为
-    ``{本轮写入模型的完整 user 文本（仅去非法字符）}_{YYYYMMDD_HHMMSS}``；
-    否则若有 ``video_prompt`` 则同格式；否则 ``{摘要}_{文件主名六位}``。
+    **写出**：``library=video``；展示名优先为「【用户原文】」经清洗与截断后的文本（去掉「已引用…」脚注，不附加时间戳）；
+    否则退化为 ``video_prompt`` 或 ``{摘要}_{文件主名六位}``。
     """
     try:
         data = json.loads(result_text)
@@ -189,16 +216,23 @@ def persist_video_tool_output(
         return
 
     time_s = datetime.now().strftime("%Y%m%d_%H%M%S")
-    full_agent = (agent_chat_user_message_for_model.get() or "").strip()
+    raw_ctx = (agent_chat_user_message_for_model.get() or "").strip()
+    plain = _user_plain_for_video_display_name(raw_ctx)
     vp = (video_prompt or "").strip()
 
-    if full_agent:
-        base = _sanitize_full_asset_name_text(full_agent)
-        fixed_display = f"{base}_{time_s}" if base else f"视频_{time_s}"
+    if plain:
+        base = _sanitize_full_asset_name_text(plain)
+        fixed_display = _clip_video_display_name(base) if base else f"视频_{time_s}"
+        use_fixed = True
+    elif raw_ctx:
+        t2 = _REF_NOTE_TAIL_RE.sub("", raw_ctx).strip()
+        t2 = _TS_SUFFIX_RE.sub("", t2).strip()
+        base = _sanitize_full_asset_name_text(t2)
+        fixed_display = _clip_video_display_name(base) if base else f"视频_{time_s}"
         use_fixed = True
     elif vp:
-        base = _sanitize_full_asset_name_text(vp)
-        fixed_display = f"{base}_{time_s}" if base else f"视频_{time_s}"
+        base = _sanitize_full_asset_name_text(_user_plain_for_video_display_name(vp) or vp)
+        fixed_display = _clip_video_display_name(base) if base else f"视频_{time_s}"
         use_fixed = True
     else:
         use_fixed = False

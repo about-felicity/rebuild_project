@@ -31,6 +31,7 @@ from agent_runtime.persist import (
     persist_image_tool_output,
     persist_video_tool_output,
 )
+from agent_runtime.video_guard import video_tool_json_indicates_success
 
 TOOL_SESSION = None
 
@@ -240,6 +241,7 @@ def collect_tool_results(assistant_content: list) -> list[dict[str, Any]]:
     pid = agent_project_id_ctx.get()
     hub = get_media_hub()
     out: list[dict[str, Any]] = []
+    video_written_in_batch = False
 
     for block in assistant_content:
         if isinstance(block, dict):
@@ -330,6 +332,25 @@ def collect_tool_results(assistant_content: list) -> list[dict[str, Any]]:
                 out.append({"type": "tool_result", "tool_use_id": tid, "content": text})
 
             elif name == "generate_video_clip":
+                if video_written_in_batch:
+                    out.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tid,
+                            "content": json.dumps(
+                                {
+                                    "ok": False,
+                                    "error": (
+                                        "同一轮 assistant 中已成功生成并入库一条成片；"
+                                        "已跳过重复的 generate_video_clip，避免视频库出现两条相同请求。"
+                                    ),
+                                    "skipped_duplicate_video": True,
+                                },
+                                ensure_ascii=False,
+                            ),
+                        }
+                    )
+                    continue
                 stack_n = len(_deduped_chat_ref_uris())
                 lsb_gate = (agent_last_storyboard_uri.get() or "").strip()
                 if stack_n >= 2 and not lsb_gate:
@@ -419,6 +440,8 @@ def collect_tool_results(assistant_content: list) -> list[dict[str, Any]]:
                             summary_base=_video_tool_summary_label(inp),
                             video_prompt=str(inp.get("prompt", "") or ""),
                         )
+                        if video_tool_json_indicates_success(data):
+                            video_written_in_batch = True
                 except json.JSONDecodeError:
                     pass
                 out.append({"type": "tool_result", "tool_use_id": tid, "content": text})

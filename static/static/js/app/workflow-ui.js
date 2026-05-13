@@ -385,6 +385,16 @@ function frameosMediaFileFetchUrl(storedUri) {
     return buildApiPath(`/api/assets/file/?${new URLSearchParams({ src: path }).toString()}`);
 }
 
+/** 可走 ``/api/assets/file`` 拉取原文件的素材（排除 blob/data/外链等） */
+function mediaItemHasDownloadableFileUrl(m) {
+    if (!m || m._uploadPending) return false;
+    const u = m.url;
+    if (u == null || u === "") return false;
+    const su = String(u).trim();
+    if (su.startsWith("blob:") || su.startsWith("data:")) return false;
+    return !!frameosMediaFileFetchUrl(u);
+}
+
 /** 栅格图预览：WebP 走原图接口由浏览器解码（避免服务端 Pillow 未编 libwebp 时缩略图为空或灰块） */
 function frameosRasterPreviewUrl(absUrl, storedUri, w, h) {
     const path = localMediaPathFromAbs(absUrl);
@@ -1541,10 +1551,19 @@ function toggleVideoBulkSelectFromEl(el) {
 
 function mediaCheckSlotHtml(m) {
     const isSelected = state.selectedMedia && state.selectedMedia.id === m.id;
-    if (isTimelineVideoClip(m) && m.id !== undefined && m.id !== null) {
+    const bulkEligible =
+        m.id !== undefined &&
+        m.id !== null &&
+        (isTimelineVideoClip(m) || mediaItemHasDownloadableFileUrl(m));
+    if (bulkEligible) {
         const sid = String(m.id);
         const bulk = !!state.libraryBulkSelectedIds[sid];
-        return `<div class="media-check media-check--toggle-bulk${bulk ? " is-on" : ""}" role="checkbox" aria-checked="${bulk}" title="勾选后加入「选中入轨并拼接」" data-bulk-id="${escAttr(sid)}" onclick="event.stopPropagation();toggleVideoBulkSelectFromEl(this)">${bulk ? "✓" : ""}</div>`;
+        const title = isTimelineVideoClip(m)
+            ? "勾选后可批量入轨拼接或批量下载 ZIP"
+            : "勾选后可批量下载 ZIP";
+        return `<div class="media-check media-check--toggle-bulk${bulk ? " is-on" : ""}" role="checkbox" aria-checked="${bulk}" title="${escAttr(
+            title,
+        )}" data-bulk-id="${escAttr(sid)}" onclick="event.stopPropagation();toggleVideoBulkSelectFromEl(this)">${bulk ? "✓" : ""}</div>`;
     }
     return `<div class="media-check">${isSelected ? "✓" : ""}</div>`;
 }
@@ -1568,6 +1587,171 @@ function selectAllVisibleVideosInLibrary() {
     }
     refreshMediaGridView();
     showToast(`已勾选 ${n} 个视频`);
+}
+
+function selectAllVisibleDownloadableInLibrary() {
+    if (!state.activeProject) {
+        showToast("请先选择项目");
+        return;
+    }
+    const view = getActiveProjectMediaView();
+    let n = 0;
+    for (const m of view) {
+        if (!mediaItemHasDownloadableFileUrl(m)) continue;
+        state.libraryBulkSelectedIds[String(m.id)] = true;
+        n++;
+    }
+    if (!n) {
+        showToast("当前列表没有可经服务器下载的素材（需为本地 /media 路径）");
+        return;
+    }
+    refreshMediaGridView();
+    showToast(`已勾选 ${n} 个可下载素材`);
+}
+
+function sanitizeDownloadEntryFilename(name) {
+    let s = String(name || "file")
+        .replace(/[\\/:*?"<>|\x00-\x1f]/g, "_")
+        .replace(/^\.+/, "")
+        .trim();
+    s = s.replace(/[. ]+$/g, "");
+    if (!s) s = "file";
+    return s;
+}
+
+/** 卡片 ``m.name`` 是否已带常见媒体扩展名（避免把「xxx.mp4」再拼一层） */
+function displayNameHasKnownMediaExtension(name) {
+    return /\.(mp4|m4v|webm|mov|mkv|avi|png|jpe?g|gif|webp|bmp|svg|mp3|wav|m4a|aac|flac|opus|json|md|txt|pdf)$/i.test(
+        String(name || "").trim(),
+    );
+}
+
+/** 从素材存储路径解析扩展名（多为 ``…/uuid.mp4``） */
+function extFromStoredMediaUrl(rawUrl) {
+    const abs = resolveAssetPreviewUrl(rawUrl);
+    let path = localMediaPathFromAbs(abs);
+    if (!path) path = String(rawUrl || "").trim().split("?")[0];
+    const leaf = (path.split("/").pop() || "").toLowerCase();
+    const m = leaf.match(
+        /\.(mp4|m4v|webm|mov|mkv|avi|png|jpe?g|gif|webp|bmp|svg|mp3|wav|m4a|aac|flac|opus|json|md|txt|pdf)$/,
+    );
+    if (!m) return "";
+    let e = m[1].toLowerCase();
+    if (e === "jpeg") e = "jpg";
+    return `.${e}`;
+}
+
+function defaultExtForMediaType(type) {
+    const t = String(type || "image").toLowerCase();
+    if (t === "video") return ".mp4";
+    if (t === "audio") return ".mp3";
+    if (t === "storyboard") return ".json";
+    return ".png";
+}
+
+/**
+ * ZIP 内单条文件名：主干与卡片 ``m.name`` 一致；若名称无常见后缀则从 ``url`` 或类型补全，
+ * 避免解压后无 ``.mp4`` 等导致系统无法识别类型。
+ */
+function zipEntryLogicalFilename(m) {
+    const rawName = String(m.name || "file").trim() || "file";
+    let base = sanitizeDownloadEntryFilename(rawName);
+    if (displayNameHasKnownMediaExtension(base)) return base;
+    const fromUrl = extFromStoredMediaUrl(m.url);
+    if (fromUrl && !base.toLowerCase().endsWith(fromUrl.toLowerCase())) return base + fromUrl;
+    if (fromUrl) return base;
+    return base + defaultExtForMediaType(m.type);
+}
+
+function uniqueZipEntryName(usedSet, displayName) {
+    const base = sanitizeDownloadEntryFilename(displayName);
+    if (!usedSet.has(base)) {
+        usedSet.add(base);
+        return base;
+    }
+    const dot = base.lastIndexOf(".");
+    const hasExt = dot > 0 && dot < base.length - 1;
+    const ext = hasExt ? base.slice(dot) : "";
+    const stem = hasExt ? base.slice(0, dot) : base;
+    let i = 2;
+    let candidate;
+    do {
+        candidate = `${stem}_${i}${ext}`;
+        i++;
+    } while (usedSet.has(candidate));
+    usedSet.add(candidate);
+    return candidate;
+}
+
+async function downloadBulkSelectedMediaAsZip() {
+    if (!state.activeProject) {
+        showToast("请先选择项目");
+        return;
+    }
+    const JSZipCtor = typeof globalThis !== "undefined" ? globalThis.JSZip : undefined;
+    if (typeof JSZipCtor !== "function") {
+        showToast("批量下载依赖 JSZip 脚本，请刷新页面或检查网络");
+        return;
+    }
+    const keySet = new Set(Object.keys(state.libraryBulkSelectedIds));
+    if (!keySet.size) {
+        showToast("请先勾选要下载的素材（卡片左上角方框）");
+        return;
+    }
+    const view = getActiveProjectMediaView();
+    const picks = [];
+    for (const m of view) {
+        if (!keySet.has(String(m.id))) continue;
+        if (!mediaItemHasDownloadableFileUrl(m)) continue;
+        picks.push(m);
+    }
+    if (!picks.length) {
+        showToast("勾选项中没有可经服务器下载的素材（外链或仅本地 blob 无法打包）");
+        return;
+    }
+    showToast("正在打包下载…（素材较多时请稍候）", 8000);
+    const zip = new JSZipCtor();
+    const used = new Set();
+    let ok = 0;
+    const errs = [];
+    for (const m of picks) {
+        const fileUrl = frameosMediaFileFetchUrl(m.url);
+        const entryName = uniqueZipEntryName(used, zipEntryLogicalFilename(m));
+        try {
+            const resp = await fetch(fileUrl, { credentials: "include" });
+            if (!resp.ok) {
+                errs.push(`${m.name}: HTTP ${resp.status}`);
+                continue;
+            }
+            const blob = await resp.blob();
+            zip.file(entryName, blob);
+            ok++;
+        } catch (e) {
+            errs.push(`${m.name}: ${e && e.message ? e.message : String(e)}`);
+        }
+    }
+    if (!ok) {
+        showToast("打包失败：" + (errs[0] || "未知错误").slice(0, 120));
+        return;
+    }
+    try {
+        const outBlob = await zip.generateAsync({ type: "blob", compression: "DEFLATE" });
+        const a = document.createElement("a");
+        const projName = sanitizeDownloadEntryFilename(state.activeProject.name || "project");
+        a.href = URL.createObjectURL(outBlob);
+        a.download = `${projName}_素材批量_${ok}项.zip`;
+        a.rel = "noopener";
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+            URL.revokeObjectURL(a.href);
+            a.remove();
+        }, 1500);
+        const tail = errs.length ? `（${errs.length} 项失败）` : "";
+        showToast(`已下载 ZIP，共 ${ok} 个文件${tail}`);
+    } catch (e) {
+        showToast("生成 ZIP 失败：" + (e && e.message ? e.message : String(e)).slice(0, 120));
+    }
 }
 
 function clearLibraryBulkSelection() {
@@ -3528,10 +3712,14 @@ function formatSbEvent(ev) {
         if (ev.id === "analyze_product" && ev.packshot_image_index != null) {
             extra = ` · 产品主图=第 ${ev.packshot_image_index} 张`;
             if (ev.talent_reference_image_index != null) {
-                extra += `，人物参考=第 ${ev.talent_reference_image_index} 张（万相双参考：先人物后产品）`;
+                extra += `，人物参考=第 ${ev.talent_reference_image_index} 张`;
             } else {
-                extra += "（万相单参考：仅产品）";
+                extra += "（无独立人物参考）";
             }
+            if (ev.background_reference_image_index != null) {
+                extra += `，背景参考=第 ${ev.background_reference_image_index} 张`;
+            }
+            extra += "（生图顺序：人物→产品→背景，缺省则省略）";
         }
         return { text: `✓ ${ev.id || "step"}${sid} ${ev.detail || ""}${extra}`.trim(), cls: "sb-log-line--done" };
     }
@@ -3937,6 +4125,8 @@ export function mountFrameOS() {
         addAllVisibleVideosToTimeline,
         toggleVideoBulkSelectFromEl,
         selectAllVisibleVideosInLibrary,
+        selectAllVisibleDownloadableInLibrary,
+        downloadBulkSelectedMediaAsZip,
         clearLibraryBulkSelection,
         addBulkSelectedVideosToTimelineAndGoSplice,
         analyzeSelected,

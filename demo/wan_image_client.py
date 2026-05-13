@@ -33,14 +33,42 @@ def _strict_product_lock_enabled() -> bool:
     return v not in ("0", "false", "no", "off", "")
 
 
-def _strict_product_lock_preamble(*, dual_ref: bool) -> str:
-    if dual_ref:
+def _storyboard_ref_layout(*, has_character: bool, has_background: bool) -> str:
+    if has_character and has_background:
+        return "triple"
+    if has_character:
+        return "dual_cp"
+    if has_background:
+        return "dual_pb"
+    return "single"
+
+
+def _strict_product_lock_preamble(*, layout: str) -> str:
+    if layout == "triple":
+        return (
+            "【产品锁死·强制】参考图1=人物模特，参考图2=用户上传的产品实拍，参考图3=场景/环境参考。"
+            "画面中出现的产品必须与参考图2为同一包装：外轮廓、比例、泵头/盖结构、标签版式、LOGO 形状、印刷文字、主辅色须与图2一致，"
+            "禁止替换为其它品牌、禁止臆造瓶型或「通用电商洗发水瓶」、禁止改动标签文案与图形。"
+            "若下方镜头描述中的 product/瓶型/圆柱/磨砂等词与参考图2视觉不一致，一律以参考图2为准并忽略冲突描述。"
+            "图1仅用于锁定人物面部、发型、体型与衣着，不得换脸。"
+            "参考图3用于环境构图、空间透视、远景陈设与整体光线色调；人物与产品须自然融入该场景，"
+            "禁止把图3中无关路人当作主画面主体。"
+        )
+    if layout == "dual_cp":
         return (
             "【产品锁死·强制】参考图1=人物模特，参考图2=用户上传的产品实拍。"
             "画面中出现的产品必须与参考图2为同一包装：外轮廓、比例、泵头/盖结构、标签版式、LOGO 形状、印刷文字、主辅色须与图2一致，"
             "禁止替换为其它品牌、禁止臆造瓶型或「通用电商洗发水瓶」、禁止改动标签文案与图形。"
             "若下方镜头描述中的 product/瓶型/圆柱/磨砂等词与参考图2视觉不一致，一律以参考图2为准并忽略冲突描述。"
             "图1仅用于锁定人物面部、发型、体型与衣着，不得换脸。"
+        )
+    if layout == "dual_pb":
+        return (
+            "【产品锁死·强制】参考图1=用户上传的产品实拍，参考图2=场景/环境参考。"
+            "画面中出现的产品必须与参考图1为同一包装：外轮廓、比例、泵头/盖结构、标签版式、LOGO、文字、配色须与图1一致，"
+            "禁止替换品牌、禁止臆造包装、禁止改成其它常见瓶型。"
+            "若下方镜头描述与参考图1不一致，一律以参考图1为准并忽略冲突描述。"
+            "参考图2用于环境、空间布局、透视与整体光线氛围；产品与图1须完全一致。"
         )
     return (
         "【产品锁死·强制】参考图1=用户上传的产品实拍。"
@@ -132,8 +160,8 @@ def _coerce_wan_reference_paths(
         out.append(p)
     if not out:
         raise ValueError("至少一张参考图")
-    if len(out) > 2:
-        out = out[:2]
+    if len(out) > 3:
+        out = out[:3]
     return out
 
 
@@ -141,13 +169,16 @@ def wan_generate_shot_frame(
     text_prompt: str,
     reference_paths: str | Path | Sequence[str | Path],
     *,
+    ref_layout: str | None = None,
     api_key: Optional[str] = None,
     model: str = "wan2.7-image-pro",
     size: str = "2K",
     watermark: bool = False,
 ) -> str:
     """
-    参考图 + 文本提示生成分镜单帧。支持 1 张（仅产品）或 2 张（人物 + 产品，顺序须为图1人物、图2产品）。
+    参考图 + 文本提示生成分镜单帧。支持：
+    1 张（仅产品）；2 张（人物+产品 或 产品+背景）；3 张（人物+产品+背景，顺序须一致）。
+    ``ref_layout``：``single`` / ``dual_cp`` / ``dual_pb`` / ``triple``；为 None 时按张数推断（2 张视为 dual_cp）。
     默认异步任务（async_call + wait）。
     """
     try:
@@ -163,11 +194,31 @@ def wan_generate_shot_frame(
     configure_dashscope()
     paths = _coerce_wan_reference_paths(reference_paths)
     image_parts = [{"image": encode_file_data_uri(p)} for p in paths]
-    dual = len(paths) > 1
-    if len(paths) == 1:
+    n = len(paths)
+    if n >= 3:
+        layout = "triple"
+    elif n == 2:
+        layout = (ref_layout or "dual_cp").strip()
+        if layout not in ("dual_cp", "dual_pb"):
+            layout = "dual_cp"
+    else:
+        layout = "single"
+
+    if layout == "single":
         suffix = (
             "在参考图1产品外观完全不变的前提下，生成电影分镜单帧静态图；"
             "遵循上方镜头构图、机位与光影；画面无字幕、无画框、无水印式装饰。"
+        )
+    elif layout == "dual_pb":
+        suffix = (
+            "【双参考执行】产品以参考图1为准；场景环境、空间透视与整体光线以参考图2为准。"
+            "在镜头描述基础上生成单帧静态图；无字幕、无画框、无水印式装饰。"
+        )
+    elif layout == "triple":
+        suffix = (
+            "【三参考执行】人物以参考图1为准；产品以参考图2为准（手持物须为图2实物）；"
+            "场景环境、空间透视与布光氛围以参考图3为准并与镜头描述协调。"
+            "生成单帧静态图；无字幕、无画框、无水印式装饰。"
         )
     else:
         suffix = (
@@ -175,7 +226,7 @@ def wan_generate_shot_frame(
             "在镜头描述基础上生成单帧静态图；无字幕、无画框、无水印式装饰。"
         )
     pre = (
-        _strict_product_lock_preamble(dual_ref=dual) + "\n\n"
+        _strict_product_lock_preamble(layout=layout) + "\n\n"
         if _strict_product_lock_enabled()
         else ""
     )
@@ -241,6 +292,7 @@ def fill_storyboard_shots_with_wan(
     relative_url_prefix: str,
     *,
     character_reference_image_path: str | Path | None = None,
+    background_reference_image_path: str | Path | None = None,
     api_key: Optional[str] = None,
     model: str = "wan2.7-image-pro",
     size: str = "2K",
@@ -253,7 +305,7 @@ def fill_storyboard_shots_with_wan(
     将 PNG 保存到 frames_directory，并把 frame.image_url 设为相对路径
     「relative_url_prefix/safe_shot_id.png」（POSIX 斜杠）。
 
-    若提供 character_reference_image_path 且与产品图不是同一文件，则万相输入顺序为：**图1 人物、图2 产品**。
+    多参考时顺序：**人物 → 产品 → 背景**（缺人物则为 **产品 → 背景**）。
     """
     prod = Path(product_reference_image_path)
     if not prod.is_file():
@@ -265,7 +317,23 @@ def fill_storyboard_shots_with_wan(
         if c.is_file() and c.resolve() != prod.resolve():
             char = c
 
-    ref_paths: list[Path] = [char, prod] if char else [prod]
+    bg: Optional[Path] = None
+    if background_reference_image_path is not None:
+        b = Path(background_reference_image_path)
+        if b.is_file():
+            br = b.resolve()
+            if br != prod.resolve() and (char is None or br != char.resolve()):
+                bg = b
+
+    layout = _storyboard_ref_layout(has_character=bool(char), has_background=bool(bg))
+    if layout == "triple":
+        ref_paths = [char, prod, bg]  # type: ignore[list-item]
+    elif layout == "dual_cp":
+        ref_paths = [char, prod]  # type: ignore[list-item]
+    elif layout == "dual_pb":
+        ref_paths = [prod, bg]  # type: ignore[list-item]
+    else:
+        ref_paths = [prod]
 
     out_dir = Path(frames_directory)
     prefix = relative_url_prefix.strip().strip("/")
@@ -283,6 +351,7 @@ def fill_storyboard_shots_with_wan(
         url = wan_generate_shot_frame(
             prompt,
             ref_paths,
+            ref_layout=layout,
             api_key=api_key,
             model=model,
             size=size,

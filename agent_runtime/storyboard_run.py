@@ -22,6 +22,7 @@ if str(_TOOL_DIR) not in sys.path:
 
 from storyboard_pipeline import (  # noqa: E402
     PipelineInput,
+    background_reference_index_0based,
     default_prompt_preview_md_path,
     default_script_md_path,
     export_shots_complete_storyboard_script_markdown,
@@ -151,27 +152,42 @@ def run_storyboard_for_project(
         n_paths = len(abs_image_paths)
         widx = wan_reference_index_0based(result.product_desc, n_paths, product_ref_index)
         tidx = talent_reference_index_0based(result.product_desc, n_paths)
+        bgidx = background_reference_index_0based(result.product_desc, n_paths)
         prod_ref = str(Path(abs_image_paths[widx]).resolve())
         char_ref: str | None = None
         if tidx is not None and tidx != widx:
             char_ref = str(Path(abs_image_paths[tidx]).resolve())
+        used = {widx}
+        if tidx is not None:
+            used.add(tidx)
+        bg_ref: str | None = None
+        if bgidx is not None and bgidx not in used:
+            bg_ref = str(Path(abs_image_paths[bgidx]).resolve())
         prov = _storyboard_image_provider()
         if prov == "wan":
-            batch_lbl = (
-                "万相逐镜出图（图1人物 + 图2产品）"
-                if char_ref
-                else "万相逐镜出图（产品参考 第 " + str(widx + 1) + "/" + str(n_paths) + " 张）"
-            )
+            if char_ref and bg_ref:
+                batch_lbl = "万相逐镜出图（图1人物 + 图2产品 + 图3背景）"
+            elif char_ref:
+                batch_lbl = "万相逐镜出图（图1人物 + 图2产品）"
+            elif bg_ref:
+                batch_lbl = "万相逐镜出图（图1产品 + 图2背景）"
+            else:
+                batch_lbl = "万相逐镜出图（产品参考 第 " + str(widx + 1) + "/" + str(n_paths) + " 张）"
         else:
-            batch_lbl = (
-                "Seedream 逐镜出图（图1人物 + 图2产品）"
-                if char_ref
-                else "Seedream 逐镜出图（产品参考 第 "
-                + str(widx + 1)
-                + "/"
-                + str(n_paths)
-                + " 张）"
-            )
+            if char_ref and bg_ref:
+                batch_lbl = "Seedream 逐镜出图（图1人物 + 图2产品 + 图3背景）"
+            elif char_ref:
+                batch_lbl = "Seedream 逐镜出图（图1人物 + 图2产品）"
+            elif bg_ref:
+                batch_lbl = "Seedream 逐镜出图（图1产品 + 图2背景）"
+            else:
+                batch_lbl = (
+                    "Seedream 逐镜出图（产品参考 第 "
+                    + str(widx + 1)
+                    + "/"
+                    + str(n_paths)
+                    + " 张）"
+                )
         emit(
             {
                 "type": "step",
@@ -179,6 +195,7 @@ def run_storyboard_for_project(
                 "label": batch_lbl,
                 "wan_ref_index": widx,
                 "wan_talent_index": tidx,
+                "wan_background_index": bgidx,
                 "image_provider": prov,
             }
         )
@@ -203,6 +220,7 @@ def run_storyboard_for_project(
                 frames_dir,
                 frames_rel_dir,
                 character_reference_image_path=char_ref,
+                background_reference_image_path=bg_ref,
                 model=wm,
                 size=frame_px,
                 watermark=False,
@@ -218,6 +236,7 @@ def run_storyboard_for_project(
                 frames_dir,
                 frames_rel_dir,
                 character_reference_image_path=char_ref,
+                background_reference_image_path=bg_ref,
                 model=sm,
                 size=frame_px,
                 watermark=False,

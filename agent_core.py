@@ -43,6 +43,7 @@ from agent_runtime.messages import extract_last_assistant_text
 from agent_runtime.tool_dispatch import collect_tool_results
 from agent_runtime.tools_spec import SYSTEM, TOOLS
 from agent_runtime.video_guard import (
+    anchor_text_for_video_intent,
     build_forced_video_tool_round,
     last_plain_string_user_message,
     tool_results_include_successful_video,
@@ -213,7 +214,7 @@ def agent_loop(hist: list[dict[str, Any]], agent_mode: str = "normal") -> None:
         response = _messages_create_with_retries(**create_kwargs)
 
         if response.stop_reason != "tool_use":
-            anchor = last_plain_string_user_message(hist)
+            anchor = anchor_text_for_video_intent(hist)
             pack = None
             if (
                 TOOLS
@@ -239,7 +240,7 @@ def agent_loop(hist: list[dict[str, Any]], agent_mode: str = "normal") -> None:
 
         hist.append({"role": "user", "content": results})
 
-        anchor = last_plain_string_user_message(hist)
+        anchor = anchor_text_for_video_intent(hist)
         if (
             TOOLS
             and anchor

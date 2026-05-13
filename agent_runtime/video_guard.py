@@ -15,9 +15,24 @@ _VIDEO_INTENT = re.compile(
     r"(图生视频|短视频|成片|做.{0,4}视频|生成.{0,30}视频|来段视频|"
     r"wan2|动起[来]|动起来|"
     r"\d+\s*秒.{0,12}视频|视频.{0,8}\d+\s*秒|"
-    r"一段.{0,8}\d+\s*秒|\d+\s*秒钟)",
+    r"一段.{0,8}\d+\s*秒|\d+\s*秒钟|"
+    r"视频片段|成片视频|连同视频|一次性.{0,6}(视频|成片)|"
+    r"\bvideo\s*clip\b|\b\d+\s*s(ec)?\b.{0,16}\bvideo\b)",
     re.IGNORECASE,
 )
+
+
+def anchor_text_for_video_intent(hist: list[dict[str, Any]]) -> str:
+    """
+    检测「是否要图生视频」时优先用本轮 POST 写入的完整 user 文本（含引用块），
+    避免仅依赖最近一条纯文本 user 时漏掉写在引用块之后的长需求。
+    """
+    from runtime_ctx import agent_chat_user_message_for_model
+
+    ctx = (agent_chat_user_message_for_model.get() or "").strip()
+    if ctx:
+        return ctx
+    return last_plain_string_user_message(hist)
 
 
 def synthetic_tool_use_blocks(
@@ -106,6 +121,32 @@ def _short_video_title(text: str) -> str:
     return one or "成片"
 
 
+def video_tool_json_indicates_success(data: dict[str, Any]) -> bool:
+    """
+    判断 ``run_generate_video`` 返回的 JSON 是否表示「已拿到成片地址、应视为本轮已有视频」，
+    供 video_guard 与 tool_dispatch 去重；须与 ``persist_video_tool_output`` 的入库条件大致一致。
+    """
+    if not isinstance(data, dict) or data.get("ok") is False:
+        return False
+    if isinstance(data.get("destination"), str):
+        return False
+    created = data.get("created_asset_ids") or []
+    if not isinstance(created, list) or not created:
+        return False
+    urls = [str(x).strip() for x in created if str(x).strip()]
+    if not urls:
+        return False
+    st = str(data.get("status") or "").strip().lower()
+    if st in ("success", "succeeded"):
+        return True
+    if data.get("source_image_used") is not None or data.get(
+        "reference_image_urls_requested"
+    ) is not None:
+        if any(".mp4" in u.lower() for u in urls):
+            return True
+    return False
+
+
 def _tool_result_payload_video_ok(payload: str) -> bool:
     if not payload or payload.startswith("Error:"):
         return False
@@ -113,15 +154,7 @@ def _tool_result_payload_video_ok(payload: str) -> bool:
         data = json.loads(payload)
     except json.JSONDecodeError:
         return False
-    if not isinstance(data, dict) or data.get("ok") is False:
-        return False
-    if isinstance(data.get("destination"), str):
-        return False
-    st = str(data.get("status") or "")
-    created = data.get("created_asset_ids") or []
-    if not isinstance(created, list) or not created:
-        return False
-    return st == "success"
+    return video_tool_json_indicates_success(data)
 
 
 def history_has_successful_video_clip(hist: list[dict[str, Any]]) -> bool:
@@ -173,7 +206,7 @@ def build_forced_video_tool_round(
         count_deduped_chat_video_ref_uris,
     )
 
-    first_u = last_plain_string_user_message(hist)
+    first_u = anchor_text_for_video_intent(hist)
     if not user_demands_video_clip(first_u):
         return None
     if history_has_successful_video_clip(subhist_since_last_plain_user(hist)):

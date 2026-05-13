@@ -43,14 +43,47 @@ def _strict_product_lock_enabled() -> bool:
     return v not in ("0", "false", "no", "off", "")
 
 
-def _strict_product_lock_preamble(*, dual_ref: bool) -> str:
-    if dual_ref:
+def _storyboard_ref_layout(
+    *,
+    has_character: bool,
+    has_background: bool,
+) -> str:
+    """分镜逐镜：参考图组合，用于锁产品与场景。"""
+    if has_character and has_background:
+        return "triple"
+    if has_character:
+        return "dual_cp"
+    if has_background:
+        return "dual_pb"
+    return "single"
+
+
+def _strict_product_lock_preamble(*, layout: str) -> str:
+    if layout == "triple":
+        return (
+            "【产品锁死·强制】参考图1=人物模特，参考图2=用户上传的产品实拍，参考图3=场景/环境参考。"
+            "画面中出现的产品必须与参考图2为同一包装：外轮廓、比例、泵头/盖结构、标签版式、LOGO 形状、印刷文字、主辅色须与图2一致，"
+            "禁止替换为其它品牌、禁止臆造瓶型或「通用电商洗发水瓶」、禁止改动标签文案与图形。"
+            "若下方镜头描述中的 product/瓶型/圆柱/磨砂等词与参考图2视觉不一致，一律以参考图2为准并忽略冲突描述。"
+            "图1仅用于锁定人物面部、发型、体型与衣着，不得换脸。"
+            "参考图3用于环境构图、空间透视、远景陈设与整体光线色调；人物与产品须自然融入该场景，"
+            "禁止把图3中无关路人当作主画面主体。"
+        )
+    if layout == "dual_cp":
         return (
             "【产品锁死·强制】参考图1=人物模特，参考图2=用户上传的产品实拍。"
             "画面中出现的产品必须与参考图2为同一包装：外轮廓、比例、泵头/盖结构、标签版式、LOGO 形状、印刷文字、主辅色须与图2一致，"
             "禁止替换为其它品牌、禁止臆造瓶型或「通用电商洗发水瓶」、禁止改动标签文案与图形。"
             "若下方镜头描述中的 product/瓶型/圆柱/磨砂等词与参考图2视觉不一致，一律以参考图2为准并忽略冲突描述。"
             "图1仅用于锁定人物面部、发型、体型与衣着，不得换脸。"
+        )
+    if layout == "dual_pb":
+        return (
+            "【产品锁死·强制】参考图1=用户上传的产品实拍，参考图2=场景/环境参考。"
+            "画面中出现的产品必须与参考图1为同一包装：外轮廓、比例、泵头/盖结构、标签版式、LOGO、文字、配色须与图1一致，"
+            "禁止替换品牌、禁止臆造包装、禁止改成其它常见瓶型。"
+            "若下方镜头描述与参考图1不一致，一律以参考图1为准并忽略冲突描述。"
+            "参考图2用于环境、空间布局、透视与整体光线氛围；产品与图1须完全一致。"
         )
     return (
         "【产品锁死·强制】参考图1=用户上传的产品实拍。"
@@ -66,6 +99,15 @@ _REF_SUFFIX_SINGLE = (
 )
 _REF_SUFFIX_DUAL = (
     "【双参考执行】人物以参考图1为准；产品以参考图2为准，手持物必须是图2所示实物，不得变形走样。"
+    "在镜头描述基础上生成单帧静态图；无字幕、无画框、无水印式装饰。"
+)
+_REF_SUFFIX_TRIPLE = (
+    "【三参考执行】人物以参考图1为准；产品以参考图2为准（手持物须为图2实物）；"
+    "场景环境、空间透视与布光氛围以参考图3为准并与镜头描述协调。"
+    "生成单帧静态图；无字幕、无画框、无水印式装饰。"
+)
+_REF_SUFFIX_PROD_BG = (
+    "【双参考执行】产品以参考图1为准；场景环境、空间透视与整体光线以参考图2为准。"
     "在镜头描述基础上生成单帧静态图；无字幕、无画框、无水印式装饰。"
 )
 _MAX_PROMPT_CHARS = 5000
@@ -445,6 +487,7 @@ def fill_storyboard_shots_with_seedream(
     relative_url_prefix: str,
     *,
     character_reference_image_path: str | Path | None = None,
+    background_reference_image_path: str | Path | None = None,
     model: str | None = None,
     size: str = "2K",
     watermark: bool = False,
@@ -454,7 +497,7 @@ def fill_storyboard_shots_with_seedream(
     """
     逐镜调用 Seedream：使用每镜 ``generated_prompts.image_prompt``；
     落盘 PNG/JPEG（取决于 ``SEEDREAM_OUTPUT_FORMAT``），并写回 ``frame.image_url`` 相对路径。
-    双参考时图片顺序为 **人物 → 产品**（与万相一致）。
+    多参考时顺序：**人物 → 产品 → 背景**（缺人物则为 **产品 → 背景**；均无背景则同原双参考/单参考）。
     """
     prod = Path(product_reference_image_path)
     if not prod.is_file():
@@ -466,19 +509,41 @@ def fill_storyboard_shots_with_seedream(
         if c.is_file() and c.resolve() != prod.resolve():
             char = c
 
-    if char:
-        image_field: str | list[str] = [
-            image_file_to_data_url(char),
+    bg: Optional[Path] = None
+    if background_reference_image_path is not None:
+        b = Path(background_reference_image_path)
+        if b.is_file():
+            br = b.resolve()
+            if br != prod.resolve() and (char is None or br != char.resolve()):
+                bg = b
+
+    layout = _storyboard_ref_layout(has_character=bool(char), has_background=bool(bg))
+    if layout == "triple":
+        image_field = [
+            image_file_to_data_url(char),  # type: ignore[arg-type]
+            image_file_to_data_url(prod),
+            image_file_to_data_url(bg),  # type: ignore[arg-type]
+        ]
+        suffix = _REF_SUFFIX_TRIPLE
+    elif layout == "dual_cp":
+        image_field = [
+            image_file_to_data_url(char),  # type: ignore[arg-type]
             image_file_to_data_url(prod),
         ]
         suffix = _REF_SUFFIX_DUAL
+    elif layout == "dual_pb":
+        image_field = [
+            image_file_to_data_url(prod),
+            image_file_to_data_url(bg),  # type: ignore[arg-type]
+        ]
+        suffix = _REF_SUFFIX_PROD_BG
     else:
         image_field = image_file_to_data_url(prod)
         suffix = _REF_SUFFIX_SINGLE
 
     mid = (model or "").strip() or os.getenv("ARK_IMAGE_MODEL", DEFAULT_ARK_SEEDREAM_MODEL).strip()
     size_s = coerce_seedream_size(size)
-    if char:
+    if layout in ("triple", "dual_cp", "dual_pb"):
         if parse_seedream_wxh(size_s) is None:
             size_s = coerce_seedream_size("1476*2624")
         before = size_s
@@ -510,7 +575,7 @@ def fill_storyboard_shots_with_seedream(
         print(f"  [Seedream {i + 1}/{len(shots)}] {shot.get('shot_id')} 生图中...")
 
         pre = (
-            _strict_product_lock_preamble(dual_ref=bool(char)) + "\n\n"
+            _strict_product_lock_preamble(layout=layout) + "\n\n"
             if _strict_product_lock_enabled()
             else ""
         )

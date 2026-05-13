@@ -289,19 +289,21 @@ def call_claude(
 # Step 0：路由 + 产品轨 / 人物轨 双解析
 # ──────────────────────────────────────────
 
-STEP0_ROUTE_SYSTEM = """你是广告素材路由员。从多张参考图中选出产品包装主图序号；若存在独立人物肖像图则给出其序号（必须与主图不同）。只输出JSON，禁止markdown。"""
+STEP0_ROUTE_SYSTEM = """你是广告素材路由员。从多张参考图中选出产品包装主图序号；若存在独立人物肖像图则给出其序号（必须与主图不同）；若存在可作为场景/环境参考的图（室内/外景/布景，非白底单品特写）则给出背景图序号（须与主图、人物图均不同）。只输出JSON，禁止markdown。"""
 
 STEP0_ROUTE_USER_TMPL = """{file_context}
 输出JSON（字段必填，无则 null 或空字符串）：
 {{
   "packshot_image_index": 1,
   "talent_reference_image_index": null,
+  "background_reference_image_index": null,
   "one_line_product": "一句话品类/产品",
   "talent_appearance_draft": "若有人物图则1句外貌草稿，否则空字符串"
 }}
 规则：
 - packshot_image_index: 1～{n}，最能代表瓶身/包装的一张。
 - talent_reference_image_index: 若有明确人物肖像且非产品主图则 1～{n}，否则 null；不得与 packshot_image_index 相同。
+- background_reference_image_index: 若有明确场景/环境参考（非白底产品棚拍、非人物大头）则 1～{n}，否则 null；不得与 packshot_image_index、talent_reference_image_index 相同。
 文件名列表：{names_hint}
 """
 
@@ -621,6 +623,19 @@ def analyze_product(
     if tix is not None and (tix < 1 or tix > n_img or tix == pk):
         tix = None
 
+    raw_bg = route.get("background_reference_image_index")
+    bix: int | None
+    if raw_bg is None or (isinstance(raw_bg, str) and raw_bg.lower() in ("null", "none", "")):
+        bix = None
+    else:
+        try:
+            bix = int(raw_bg)
+        except (TypeError, ValueError):
+            bix = None
+    if bix is not None:
+        if bix < 1 or bix > n_img or bix == pk or (tix is not None and bix == tix):
+            bix = None
+
     ta_summary = str(route.get("talent_appearance_draft") or "").strip()
     if tix is not None:
         character_visual = step0_analyze_character_only(client, image_paths[tix - 1])
@@ -653,6 +668,7 @@ def analyze_product(
         "appearance": appearance or str(product_visual.get("packshot_prompt_en", ""))[:240],
         "packshot_image_index": pk,
         "talent_reference_image_index": tix,
+        "background_reference_image_index": bix,
         "talent_appearance": ta_summary if tix is not None else None,
         "logo_position": (str(product_visual.get("label_content") or "")[:200] or None),
         "size_estimate": str(product_visual.get("size_impression") or "") or None,
@@ -682,6 +698,7 @@ def analyze_product(
             if tix is not None
             else "（无独立人物图，使用默认人物英文锁脸描述）"
         )
+        + (f"，背景参考=第{bix}张" if bix is not None else "")
     )
     return merged
 
@@ -2071,6 +2088,7 @@ def run_pipeline_with_events(
             "detail": product_desc.get("name") or "",
             "packshot_image_index": product_desc.get("packshot_image_index"),
             "talent_reference_image_index": product_desc.get("talent_reference_image_index"),
+            "background_reference_image_index": product_desc.get("background_reference_image_index"),
         }
     )
 
@@ -2293,8 +2311,9 @@ def build_image_prompt(
 
 
 def _image_prompt_visual_lock(product_desc: dict[str, Any]) -> str:
-    """文生图侧强制与上传参考一致（与万相多参考顺序对齐：先人物后产品）。"""
+    """文生图侧强制与上传参考一致（与多参考顺序对齐：人物→产品→背景）。"""
     tal_ix = product_desc.get("talent_reference_image_index")
+    bg_ix = product_desc.get("background_reference_image_index")
     if tal_ix is not None:
         ta = product_desc.get("talent_appearance")
         s = (
@@ -2305,7 +2324,17 @@ def _image_prompt_visual_lock(product_desc: dict[str, Any]) -> str:
         s += (
             "。【一致性】画面中的商品包装须与参考图②（产品主图）瓶型、标签排版与主色完全一致，不得换成其他品牌或臆造包装"
         )
+        if bg_ix is not None:
+            s += (
+                "。【一致性】场景空间、远景陈设与整体光线氛围须与参考图③（场景/背景上传图）协调一致，"
+                "勿凭空换成无关环境"
+            )
         return s
+    if bg_ix is not None:
+        return (
+            "【一致性】画面中的产品须与参考图①（产品主图）的瓶型、标签与配色完全一致，不得替换为其他商品。"
+            "【一致性】场景环境与整体光线须呼应参考图②（场景/背景上传图），勿完全另造无关空间"
+        )
     return (
         "【一致性】画面中的产品须与参考图（产品主图）的瓶型、标签与配色完全一致，不得替换为其他商品"
     )
@@ -2726,6 +2755,24 @@ def talent_reference_index_0based(
     return idx0
 
 
+def background_reference_index_0based(
+    product_desc: dict[str, Any],
+    n_paths: int,
+) -> int | None:
+    """Step0 场景/背景参考图序号（0-based）；无则 None。"""
+    raw = product_desc.get("background_reference_image_index")
+    if raw is None:
+        return None
+    try:
+        ix1 = int(raw)
+    except (TypeError, ValueError):
+        return None
+    idx0 = ix1 - 1
+    if idx0 < 0 or idx0 >= n_paths:
+        return None
+    return idx0
+
+
 def wan_reference_index_0based(
     product_desc: dict[str, Any],
     n_paths: int,
@@ -2805,15 +2852,25 @@ def run_storyboard_one_stop(
         n_ip = len(pipeline_input.image_paths)
         widx = wan_reference_index_0based(result.product_desc, n_ip, product_ref_index)
         tidx = talent_reference_index_0based(result.product_desc, n_ip)
+        bgidx = background_reference_index_0based(result.product_desc, n_ip)
         prod_path = pipeline_input.image_paths[widx]
         char_path = (
             pipeline_input.image_paths[tidx]
             if tidx is not None and tidx != widx
             else None
         )
+        used = {widx}
+        if tidx is not None:
+            used.add(tidx)
+        bg_path = (
+            pipeline_input.image_paths[bgidx]
+            if bgidx is not None and bgidx not in used
+            else None
+        )
         print(
             f"  [WAN] 产品参考=第 {widx + 1}/{n_ip} 张"
             + (f"；人物参考=第 {tidx + 1} 张" if char_path else "")
+            + (f"；背景参考=第 {bgidx + 1} 张" if bg_path else "")
         )
         frames_abs = json_path.parent.joinpath(*frames_rel.split("/"))
         sz = (wan_size or "").strip() or _default_storyboard_wan_size()
@@ -2823,6 +2880,7 @@ def run_storyboard_one_stop(
             frames_abs,
             frames_rel,
             character_reference_image_path=char_path,
+            background_reference_image_path=bg_path,
             model=wan_model,
             size=sz,
             watermark=wan_watermark,
